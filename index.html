@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#eef1f5">
+<title>3D 專案看板</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<div id="labels"></div>
+
+<header id="hud">
+  <div class="hud-code" id="hud-code"></div>
+  <h1 id="hud-title">載入中…</h1>
+  <div class="chips" id="hud-chips"></div>
+</header>
+
+<nav id="nav">
+  <button data-view="dashboard">📊 總覽</button>
+  <button data-view="team">👥 團隊</button>
+  <button data-view="mail">✉️ 信件 <span class="badge" id="mail-badge" hidden></span></button>
+</nav>
+
+<aside id="panel" hidden>
+  <div class="panel-head">
+    <h2 id="panel-title"></h2>
+    <button id="panel-close" aria-label="關閉">✕</button>
+  </div>
+  <div id="panel-body"></div>
+</aside>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

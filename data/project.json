@@ -1,0 +1,57 @@
+{
+  "code": "LUMI-01 · 範例資料",
+  "name": "Lumi 智慧小夜燈 開發專案",
+  "nextMilestone": { "name": "試產 50 台", "date": "2026-12-04" },
+  "team": [
+    { "name": "小安", "role": "專案經理", "color": "#5b8def" },
+    { "name": "阿哲", "role": "電子工程", "color": "#f2a93b" },
+    { "name": "Mia", "role": "工業設計", "color": "#b574d6" },
+    { "name": "志豪", "role": "韌體", "color": "#4caf7d" },
+    { "name": "佩珊", "role": "採購 / 供應商", "color": "#e5584f" }
+  ],
+  "stages": [
+    {
+      "name": "規劃", "color": "#5b8def",
+      "tasks": [
+        { "title": "產品規格書", "owner": "小安", "status": "done" },
+        { "title": "成本目標試算", "owner": "佩珊", "status": "done" },
+        { "title": "時程與里程碑", "owner": "小安", "status": "done" }
+      ]
+    },
+    {
+      "name": "設計", "color": "#b574d6",
+      "tasks": [
+        { "title": "外觀 ID 定案", "owner": "Mia", "status": "done" },
+        { "title": "電路圖 v2", "owner": "阿哲", "status": "done" },
+        { "title": "PCB Layout", "owner": "阿哲", "status": "doing", "due": "2026-11-18" },
+        { "title": "韌體架構", "owner": "志豪", "status": "doing", "due": "2026-11-20" }
+      ]
+    },
+    {
+      "name": "打樣", "color": "#f2a93b",
+      "tasks": [
+        { "title": "3D 列印外殼", "owner": "Mia", "status": "done" },
+        { "title": "PCB 打樣下單", "owner": "佩珊", "status": "doing", "due": "2026-11-21" },
+        { "title": "LED 模組到料", "owner": "佩珊", "status": "blocked", "due": "2026-11-17", "note": "供應商交期延後一週" },
+        { "title": "手工組裝 5 台", "owner": "阿哲", "status": "todo", "due": "2026-11-27" }
+      ]
+    },
+    {
+      "name": "測試", "color": "#3fb6b2",
+      "tasks": [
+        { "title": "測試計畫", "owner": "小安", "status": "doing", "due": "2026-11-19" },
+        { "title": "亮度 / 色溫量測", "owner": "阿哲", "status": "todo" },
+        { "title": "續航與溫升", "owner": "志豪", "status": "todo" },
+        { "title": "落摔測試", "owner": "Mia", "status": "todo" }
+      ]
+    },
+    {
+      "name": "量產", "color": "#4caf7d",
+      "tasks": [
+        { "title": "試產 50 台", "owner": "佩珊", "status": "todo", "due": "2026-12-04" },
+        { "title": "包裝設計", "owner": "Mia", "status": "todo" },
+        { "title": "出貨檢驗標準", "owner": "小安", "status": "todo" }
+      ]
+    }
+  ]
+}

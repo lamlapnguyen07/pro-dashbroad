@@ -1,0 +1,4 @@
+# Unencrypted mail digest and password: never commit
+private/
+.claude/
+node_modules/
