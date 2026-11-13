@@ -21,6 +21,8 @@ const PALETTE = ['#5b8def', '#d97757', '#f2a93b', '#4caf7d', '#b574d6', '#3fb6b2
 const PATHS = { board: 'data/board.enc.json', mail: 'data/mail.enc.json', calendar: 'data/calendar.enc.json', reports: 'data/reports.enc.json' };
 const LS_TOKEN = 'board.ghToken';
 const LS_PW = 'board.pw';
+const LS_FOCUS = 'board.focusCollapsed';
+const MAX_MEETINGS = 12;
 const MAX_FOCUS = 3;
 const MAX_LOG = 150;
 
@@ -122,6 +124,9 @@ function normalize(d) {
     layout: d.layout && typeof d.layout === 'object' && !Array.isArray(d.layout) ? d.layout : {},
     // A city starts with one plaza; after that the user decides.
     decor: Array.isArray(d.decor) ? d.decor.filter((x) => x && (x.type === 'plaza' || x.type === 'park')) : [{ id: 'plaza', type: 'plaza' }],
+    // Every Friday is the team meeting; notes are kept per Friday (YYYY-MM-DD).
+    weekly: { title: '週會', time: '15:00', remind: true, ...(d.weekly || {}) },
+    meetings: d.meetings && typeof d.meetings === 'object' && !Array.isArray(d.meetings) ? d.meetings : {},
   };
   if (!b.people.some((p) => p.kind === 'leader')) b.people.unshift({ id: 'me', name: '我', role: 'Leader', color: '#5b8def', kind: 'leader' });
   if (!b.people.some((p) => p.kind === 'claude')) b.people.push({ id: 'claude', name: 'Claude', role: 'AI 助理', color: '#d97757', kind: 'claude' });
@@ -296,6 +301,7 @@ function clearCity() {
   city.clear();
   labelLayer.replaceChildren();
   pickables = []; animated = []; labels = []; rings = new Map(); civicLabel = {}; cars = []; walkers = []; spots = [];
+  nightMats = []; lampMats = [];
 }
 function addLabel(node, pos, id) {
   labelLayer.append(node);
@@ -375,6 +381,7 @@ function buildCity() {
   spawnTraffic(xs, zs, cols, rows);
   spawnWalkers();
   updateCivicLabels();
+  applyDaylight(true);
 }
 
 function coneTree(x, z, s = 1, parent = city) {
@@ -397,7 +404,7 @@ function bench(x, z, ry, parent) {
 }
 function lamp(x, z, parent) {
   cyl(0.05, 1.8, mat(0x55606f), x, 0.9, z, parent, 6);
-  ball(0.16, mat(0xfff1c7, { emissive: 0xffd98a, emissiveIntensity: 0.7 }), x, 1.85, z, parent);
+  ball(0.16, lampMat(0xfff1c7, 0xffd98a), x, 1.85, z, parent);
 }
 
 /* ---------- people's buildings ---------- */
@@ -448,7 +455,7 @@ function buildLot(p, g) {
 
 function buildingStyle(style, g, color, h) {
   const X = -1.9, Z = -1.9, F = 2.8, base = 0.4;
-  const parts = [], win = mat(0xdbe7f5), body = mat(color), dark = mat(color.clone().lerp(new THREE.Color(0x1f2733), 0.35));
+  const parts = [], win = winMat(), body = mat(color), dark = mat(color.clone().lerp(new THREE.Color(0x1f2733), 0.35));
   const strips = (x, z, w, d, y0, y1) => {
     for (let y = y0 + 0.75; y < y1 - 0.35; y += 0.85) {
       parts.push(box(w * 0.72, 0.32, 0.06, win, x, y, z + d / 2 + 0.01, g), box(0.06, 0.32, d * 0.72, win, x + w / 2 + 0.01, y, z, g));
@@ -553,7 +560,7 @@ function buildCivic(key, g) {
     labelY = 4.6; door = [0, 1.6];
     lamp(-3, 2.8, g); lamp(3, 2.8, g);
   } else if (key === 'report') {
-    const purple = mat(0x8e6bd6), win = mat(0xe8defc);
+    const purple = mat(0x8e6bd6), win = winMat();
     let y = 0.4;
     [[2.4, 1.5], [1.9, 1.4], [1.4, 1.3]].forEach(([s, h]) => {
       parts.push(box(s, h, s, purple, 0, y + h / 2, -0.6, g), box(s * 0.7, 0.3, 0.06, win, 0, y + h / 2, -0.6 + s / 2 + 0.01, g), box(0.06, 0.3, s * 0.7, win, s / 2 + 0.01, y + h / 2, -0.6, g));
@@ -604,7 +611,8 @@ function updateCivicLabels() {
   if (!board || !civicLabel.calendar) return;
   // Short labels: blocks are small on phones. Details live in each panel.
   const todays = extra.calendar?.days?.find((d) => d.date === today());
-  civicLabel.calendar.textContent = todays ? `📅 ${todays.events.length} 場` : '📅 會議';
+  const mo = new Date().getDay() === 5 ? meetingOf(today()) : null;
+  civicLabel.calendar.textContent = mo && !mo.skip ? `📅 ${board.weekly.title} ${mo.time}` : todays ? `📅 ${todays.events.length} 場` : '📅 會議';
   const next = nextMilestone();
   civicLabel.milestone.textContent = next ? `⏰ ${left(daysLeft(next.date))}` : '⏰ 里程碑';
   civicLabel.report.textContent = '📈 週報';
@@ -619,7 +627,7 @@ const CAR_COLORS = [0xe5584f, 0x5b8def, 0xf2a93b, 0xf7f8fa, 0x2f3a4d, 0x4caf7d, 
 function makeCar(kind, color) {
   const g = new THREE.Group();
   const paint = mat(color, { roughness: 0.45 }), glass = mat(0xbcd7ee, { roughness: 0.2 }), tyre = mat(0x2a2f38);
-  const len = kind === 'bus' ? 2.2 : kind === 'van' ? 1.25 : 1.1;
+  const len = kind === 'bus' ? 1.9 : kind === 'van' ? 1.25 : 1.1;
   const hgt = kind === 'bus' ? 0.75 : kind === 'van' ? 0.55 : 0.32;
   box(len, hgt, 0.58, paint, 0, 0.2 + hgt / 2, 0, g);
   if (kind === 'car') {
@@ -635,33 +643,256 @@ function makeCar(kind, color) {
     w.rotation.x = Math.PI / 2;
   }
   for (const z of [-0.18, 0.18]) {
-    box(0.04, 0.08, 0.12, mat(0xfff3c4, { emissive: 0xfff0b0, emissiveIntensity: 0.7 }), len / 2 + 0.01, 0.3, z, g);
+    box(0.04, 0.08, 0.12, lampMat(0xfff3c4, 0xfff0b0), len / 2 + 0.01, 0.3, z, g);
     box(0.04, 0.08, 0.12, mat(0xe5584f, { emissive: 0xc02020, emissiveIntensity: 0.4 }), -len / 2 - 0.01, 0.3, z, g);
   }
   g.traverse((o) => { o.castShadow = true; });
   return g;
 }
+// Street network: every block corner is a node. Junctions with 3+ roads get traffic lights.
+// Cars drive on the right, keep their distance, stop at red lights, never enter a junction they
+// can't leave, turn only straight/right at signals (no crossing oncoming traffic), and give way to
+// pedestrians crossing in front of them.
+const LANE = 0.42, STOP = 2.0, ACC = 2.4, DEC = 7, CYCLE = 14;
+let net = null;
+const signalLamps = [];
+function signal(n, axis, t) {
+  if (!n.light) return 'g';
+  const p = (t + n.off) % CYCLE;
+  if (axis === 'x') return p < 5.5 ? 'g' : p < 7 ? 'y' : 'r';
+  return p < 7 ? 'r' : p < 12.5 ? 'g' : 'y';
+}
+const SIGNAL_COLOR = { g: 0x3ecf6e, y: 0xffc23c, r: 0xff4d43 };
+const dirOf = (a, b) => [Math.sign(b.x - a.x), Math.sign(b.z - a.z)];
+
 function spawnTraffic(xs, zs, cols, rows) {
-  const lines = [...zs.map((z) => ({ axis: 'x', at: z, half: (cols * S) / 2 })), ...xs.map((x) => ({ axis: 'z', at: x, half: (rows * S) / 2 }))];
+  signalLamps.length = 0;
+  const nodes = xs.map((x, i) => zs.map((z, j) => ({ i, j, x, z, off: (i * 1.7 + j * 2.9) % CYCLE })));
+  const at = (i, j) => nodes[i]?.[j];
+  nodes.flat().forEach((n) => {
+    n.nbrs = [at(n.i - 1, n.j), at(n.i + 1, n.j), at(n.i, n.j - 1), at(n.i, n.j + 1)].filter(Boolean);
+    n.light = n.nbrs.length >= 3;
+    if (!n.light) return;
+    // Two signal posts on opposite corners: one for east-west traffic, one for north-south.
+    [['x', 1.05, 1.05], ['z', -1.05, -1.05]].forEach(([axis, dx, dz]) => {
+      cyl(0.05, 1.5, mat(0x3a4250), n.x + dx, 0.75, n.z + dz, city, 6);
+      box(0.22, 0.3, 0.22, mat(0x2a2f38), n.x + dx, 1.58, n.z + dz);
+      const m = mat(0x3ecf6e, { emissive: 0x3ecf6e, emissiveIntensity: 1 });
+      ball(0.1, m, n.x + dx, 1.8, n.z + dz);
+      signalLamps.push({ n, axis, m });
+    });
+  });
+  net = { nodes };
+
   const rand = rng(cols * 13 + rows * 7);
-  const n = Math.min(14, 4 + Math.round(lines.length * 0.9));
+  const edges = nodes.flat().flatMap((a) => a.nbrs.map((b) => [a, b]));
+  const n = Math.min(16, 5 + Math.round(edges.length / 5));
   for (let i = 0; i < n; i++) {
     const kind = i === 0 ? 'bus' : rand() < 0.25 ? 'van' : 'car';
+    const len = kind === 'bus' ? 1.9 : kind === 'van' ? 1.25 : 1.1;
+    let placed = null;
+    for (let tries = 0; tries < 30 && !placed; tries++) {
+      const [a, b] = edges[Math.floor(rand() * edges.length)];
+      const s = 1 + rand() * (S - STOP - 2);
+      if (cars.every((c) => c.a !== a || c.b !== b || Math.abs(c.s - s) > (c.len + len) / 2 + 1)) placed = { a, b, s };
+    }
+    if (!placed) continue;
     const mesh = makeCar(kind, CAR_COLORS[i % CAR_COLORS.length]);
     city.add(mesh);
-    const car = { mesh, speed: kind === 'bus' ? 2 : 2.4 + rand() * 1.4 };
-    routeCar(car, lines, rand, rand() * 2 - 1);
+    const car = { mesh, kind, len, ...placed, v: 0, vmax: kind === 'bus' ? 2.1 : 2.5 + rand() * 1.1, next: null, rand, heading: 0 };
+    placeCar(car, 1);
     cars.push(car);
   }
 }
-function routeCar(car, lines, rand, u) {
-  car.lines = lines;
-  car.rand = rand;
-  car.line = lines[Math.floor(rand() * lines.length)];
-  car.dir = rand() < 0.5 ? 1 : -1;
-  car.u = u ?? -car.dir; // -1..1 along the street
-  const { axis } = car.line;
-  car.mesh.rotation.y = axis === 'x' ? (car.dir > 0 ? 0 : Math.PI) : (car.dir > 0 ? -Math.PI / 2 : Math.PI / 2);
+
+function chooseNext(c) {
+  const [dx, dz] = dirOf(c.a, c.b);
+  const opts = c.b.nbrs.filter((n) => n !== c.a).map((n) => ({ n, d: dirOf(c.b, n) }));
+  const straight = opts.find((o) => o.d[0] === dx && o.d[1] === dz);
+  const right = opts.find((o) => o.d[0] === -dz && o.d[1] === dx);
+  if (c.b.light) {
+    if (straight && right) return (c.rand() < 0.6 ? straight : right).n;
+    return (straight || right || opts[0]).n;
+  }
+  return (straight && c.rand() < 0.5 ? straight : opts[Math.floor(c.rand() * opts.length)]).n;
+}
+
+function gapAhead(c) {
+  let gap = Infinity;
+  for (const o of cars) {
+    if (o === c) continue;
+    const need = (c.len + o.len) / 2;
+    if (o.a === c.a && o.b === c.b && o.s > c.s) gap = Math.min(gap, o.s - c.s - need);
+    else if (c.next && o.a === c.b && o.b === c.next) gap = Math.min(gap, S - c.s + o.s - need);
+  }
+  return gap;
+}
+function canEnter(c, n, axis) {
+  const inside = cars.filter((o) => o !== c && o.occ === n);
+  return !inside.length || (n.light && inside.every((o) => o.occAxis === axis));
+}
+// Free space at the start of edge a->b (for "don't block the junction").
+function roomOn(a, b, self) {
+  let room = Infinity;
+  for (const o of cars) if (o !== self && o.a === a && o.b === b) room = Math.min(room, o.s - o.len / 2);
+  return room;
+}
+
+// Turns follow a curve inside the car's own lane: from its lane on the way in to its lane on
+// the way out, bending where the two lanes cross. Nothing swings into the oncoming lane.
+const TURN = 1.0;
+const lanePt = (n, d, t) => [n.x + d[0] * t - d[1] * LANE, n.z + d[1] * t + d[0] * LANE];
+function turnPoint(n, din, dout, u) {
+  const P0 = lanePt(n, din, -TURN), P1 = lanePt(n, dout, TURN);
+  // Where the incoming and outgoing lane lines cross: n + din*t + rin*L = n + dout*t2 + rout*L.
+  const rin = [-din[1], din[0]], rout = [-dout[1], dout[0]];
+  const ax = din[0], ay = din[1], bx = -dout[0], by = -dout[1];
+  const cx = (rout[0] - rin[0]) * LANE, cy = (rout[1] - rin[1]) * LANE;
+  const t = (cx * by - cy * bx) / (ax * by - ay * bx);
+  const C = [n.x + din[0] * t + rin[0] * LANE, n.z + din[1] * t + rin[1] * LANE];
+  const w = (u + TURN) / (2 * TURN), m = 1 - w;
+  const x = m * m * P0[0] + 2 * m * w * C[0] + w * w * P1[0];
+  const z = m * m * P0[1] + 2 * m * w * C[1] + w * w * P1[1];
+  const tx = 2 * m * (C[0] - P0[0]) + 2 * w * (P1[0] - C[0]), tz = 2 * m * (C[1] - P0[1]) + 2 * w * (P1[1] - C[1]);
+  return [x, z, Math.atan2(-tz, tx)];
+}
+const same = (p, q) => p[0] === q[0] && p[1] === q[1];
+
+const carTarget = new THREE.Vector3();
+function placeCar(c, blend) {
+  const d = dirOf(c.a, c.b);
+  const [dx, dz] = d;
+  const dIn = c.prev ? dirOf(c.prev, c.a) : d, dOut = c.next ? dirOf(c.b, c.next) : d;
+  let x, z, want;
+  if (c.s > S - TURN && !same(dOut, d)) [x, z, want] = turnPoint(c.b, d, dOut, c.s - S);
+  else if (c.s < TURN && !same(dIn, d)) [x, z, want] = turnPoint(c.a, dIn, d, c.s);
+  else { x = c.a.x + dx * c.s - dz * LANE; z = c.a.z + dz * c.s + dx * LANE; want = Math.atan2(-dz, dx); }
+  carTarget.set(x, 0.06, z);
+  c.mesh.position.lerp(carTarget, blend);
+  let diff = want - c.heading;
+  diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+  c.heading += diff * Math.min(1, blend * 1.4);
+  c.mesh.rotation.y = c.heading;
+}
+
+function stepTraffic(dt, t) {
+  for (const l of signalLamps) {
+    const s = signal(l.n, l.axis, t);
+    l.m.color.setHex(SIGNAL_COLOR[s]);
+    l.m.emissive.setHex(SIGNAL_COLOR[s]);
+  }
+  const brake = (dist) => Math.sqrt(2 * DEC * Math.max(0, dist));
+  for (const c of cars) {
+    if (!c.next) c.next = chooseNext(c);
+    const [dx, dz] = dirOf(c.a, c.b);
+    let limit = c.vmax;
+    const toStop = S - STOP - c.s;
+    if (toStop > -0.3) {
+      const sig = signal(c.b, dx !== 0 ? 'x' : 'z', t);
+      const canStop = (c.v * c.v) / (2 * DEC) < toStop + 0.2;
+      if (sig === 'r' || (sig === 'y' && canStop)) limit = Math.min(limit, brake(toStop));
+      if (toStop < 3 && roomOn(c.b, c.next, c) < c.len + 0.7) limit = Math.min(limit, brake(toStop));
+    }
+    // One flow at a time through a junction: wait at the line until it's clear (same-axis
+    // traffic may share a signalled junction, crossing traffic may not).
+    const axis = dx !== 0 ? 'x' : 'z';
+    if (c.occ !== c.b && toStop > -0.3 && toStop < 2.5 && !canEnter(c, c.b, axis)) limit = Math.min(limit, brake(toStop));
+    limit = Math.min(limit, brake(gapAhead(c) - 0.45));
+    // Anything physically in front of the car (e.g. a car turning out of the junction ahead).
+    const px = c.mesh.position.x, pz = c.mesh.position.z;
+    for (const o of cars) {
+      if (o === c) continue;
+      const rx = o.mesh.position.x - px, rz = o.mesh.position.z - pz;
+      const f = rx * dx + rz * dz, lat = -rx * dz + rz * dx;
+      if (f > 0 && f < 4 && Math.abs(lat) < 0.62) limit = Math.min(limit, brake(f - (c.len + o.len) / 2 - 0.4));
+    }
+    // Give way to pedestrians in front of the car.
+    for (const w of walkers) {
+      if (!w.path || !w.mesh.visible) continue;
+      const rx = w.mesh.position.x - px, rz = w.mesh.position.z - pz;
+      const f = rx * dx + rz * dz, lat = -rx * dz + rz * dx;
+      if (f > 0.2 && f < 2.4 && Math.abs(lat) < 0.6) limit = Math.min(limit, brake(f - 1));
+    }
+    c.v = c.v < limit ? Math.min(limit, c.v + ACC * dt) : Math.max(limit, c.v - DEC * 1.6 * dt);
+    const before = c.s;
+    c.s += Math.max(0, c.v) * dt;
+    if (c.occ !== c.b && c.s > S - STOP && before <= S - STOP + 0.3) {
+      // Crossing the stop line: claim the junction, or (if someone else just did) stop right here.
+      if (canEnter(c, c.b, axis)) { c.occ = c.b; c.occAxis = axis; } else { c.s = S - STOP; c.v = 0; }
+    } else if (c.occ !== c.b && c.s > S - STOP) { c.occ = c.b; c.occAxis = axis; }
+    if (c.s >= S) { c.s -= S; c.prev = c.a; c.a = c.b; c.b = c.next; c.next = null; }
+    if (c.occ && c.occ === c.a && c.s > TURN + c.len / 2) c.occ = null;
+    if (!c.next) c.next = chooseNext(c);
+    placeCar(c, 1 - Math.exp(-dt * 25));
+  }
+}
+
+/* ---------- time of day: the city follows the real clock ---------- */
+const hemi = scene.children.find((o) => o.isHemisphereLight);
+const DAY_BG = new THREE.Color(0xeef1f5), DUSK_BG = new THREE.Color(0xf3d9c4), NIGHT_BG = new THREE.Color(0x1b2233);
+const hourParam = new URLSearchParams(location.search).get('hour'); // ?hour=21 to preview the night
+let nightMats = [], lampMats = [], lastLight = -1;
+function daylight() {
+  const d = new Date();
+  const h = hourParam != null && hourParam !== '' && !Number.isNaN(+hourParam) ? +hourParam : d.getHours() + d.getMinutes() / 60;
+  if (h >= 7 && h < 17) return 1;
+  if (h >= 17 && h < 19.5) return 1 - (h - 17) / 2.5;
+  if (h >= 5 && h < 7) return (h - 5) / 2;
+  return 0;
+}
+function applyDaylight(force) {
+  const k = daylight();
+  if (!force && Math.abs(k - lastLight) < 0.005) return;
+  lastLight = k;
+  // Day -> warm dusk -> night.
+  if (k > 0.5) scene.background.copy(DUSK_BG).lerp(DAY_BG, (k - 0.5) * 2);
+  else scene.background.copy(NIGHT_BG).lerp(DUSK_BG, k * 2);
+  if (hemi) hemi.intensity = 0.5 + 1.0 * k;
+  sun.intensity = 0.25 + 1.65 * k;
+  sun.color.setHex(k < 1 && k > 0 ? 0xffd2a8 : 0xffffff);
+  for (const m of nightMats) { m.emissive.setHex(0xffd98a); m.emissiveIntensity = (1 - k) * 0.95; }
+  for (const m of lampMats) m.emissiveIntensity = 0.3 + (1 - k) * 1.4;
+  document.body.classList.toggle('night', k < 0.4);
+}
+const winMat = () => { const m = mat(0xdbe7f5); nightMats.push(m); return m; };
+const lampMat = (color, emissive) => { const m = mat(color, { emissive, emissiveIntensity: 0.7 }); lampMats.push(m); return m; };
+
+/* ---------- a little celebration when something gets done ---------- */
+const fx = new THREE.Group();
+scene.add(fx);
+const bursts = [];
+const CONFETTI = [0xffc93c, 0xe5584f, 0x5b8def, 0x4caf7d, 0xb574d6, 0xe07ab0];
+function celebrate(personId) {
+  const l = labels.find((x) => x.id === personId);
+  if (!l) return;
+  const parts = [];
+  for (let i = 0; i < 42; i++) {
+    const c = CONFETTI[i % CONFETTI.length];
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 0.05), new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 0.35 }));
+    m.position.copy(l.pos);
+    const a = Math.random() * Math.PI * 2, sp = 1.5 + Math.random() * 3;
+    m.userData.v = new THREE.Vector3(Math.cos(a) * sp, 4 + Math.random() * 4, Math.sin(a) * sp);
+    m.userData.r = new THREE.Vector3(Math.random() * 10, Math.random() * 10, Math.random() * 6);
+    fx.add(m);
+    parts.push(m);
+  }
+  bursts.push({ parts, age: 0 });
+}
+function stepFx(dt) {
+  for (let i = bursts.length - 1; i >= 0; i--) {
+    const b = bursts[i];
+    b.age += dt;
+    for (const m of b.parts) {
+      m.userData.v.y -= 9 * dt;
+      m.position.addScaledVector(m.userData.v, dt);
+      m.rotation.x += m.userData.r.x * dt;
+      m.rotation.y += m.userData.r.y * dt;
+    }
+    if (b.age > 2) {
+      b.parts.forEach((m) => { fx.remove(m); m.geometry.dispose(); m.material.dispose(); });
+      bursts.splice(i, 1);
+    }
+  }
 }
 
 /* ---------- pedestrians walking between buildings ---------- */
@@ -813,14 +1044,10 @@ const v = new THREE.Vector3();
       a.hour.rotation.z = -(((now.getHours() % 12) + mins / 60) / 12) * Math.PI * 2;
     }
   }
-  for (const c of cars) {
-    c.u += (c.dir * c.speed * dt) / c.line.half;
-    if (Math.abs(c.u) > 1.02) routeCar(c, c.lines, c.rand);
-    const along = c.u * c.line.half, lane = 0.42 * c.dir;
-    if (c.line.axis === 'x') c.mesh.position.set(along, 0.06, c.line.at + lane);
-    else c.mesh.position.set(c.line.at - lane, 0.06, along);
-  }
   for (const w of walkers) stepWalker(w, dt, t);
+  stepTraffic(dt, t);
+  stepFx(dt);
+  if ((t % 2) < dt) applyDaylight(false);
   controls.update();
   renderer.render(scene, camera);
   for (const l of labels) {
@@ -944,22 +1171,72 @@ function updateHud() {
   if (blocked) chip('卡關', String(blocked), true);
   const overdue = ts.filter(isOverdue).length;
   if (overdue) chip('逾期', String(overdue), true);
+  // Friday: a banner shortly before the meeting, and a nudge to hand in notes afterwards.
+  const now = new Date();
+  if (now.getDay() === 5) {
+    const { time, skip, m } = meetingOf(today());
+    if (!skip) {
+      const [h, mi] = time.split(':').map(Number);
+      const diff = h * 60 + mi - (now.getHours() * 60 + now.getMinutes());
+      const go = (label, value) => {
+        const c = el('button', 'chip warn click', label + (value ? ' ' : ''));
+        c.type = 'button';
+        if (value) c.append(el('b', '', value));
+        c.onclick = () => showView({ type: 'calendar' });
+        chips.append(c);
+      };
+      if (diff <= 60 && diff >= -20) go(`⏰ ${board.weekly.title} ${time}`, diff > 0 ? `${diff} 分鐘後` : '進行中');
+      else if (diff < -60 && !m.submittedAt) go('📝 交週會筆記');
+    }
+  }
 
   const card = $('#focus');
   const { list, auto } = focusTasks();
+  const collapsed = localStorage.getItem(LS_FOCUS) === '1';
   card.replaceChildren();
   card.hidden = !list.length;
-  const head = el('div', 'focus-head', '⭐ 今日三件事');
-  if (auto) head.append(el('small', '', '自動挑選'));
+  card.classList.toggle('collapsed', collapsed);
+  const head = el('button', 'focus-head');
+  head.type = 'button';
+  head.setAttribute('aria-expanded', String(!collapsed));
+  head.append(el('span', 'fh', '⭐ 今日三件事'), el('small', '', auto ? '自動挑選' : `${list.length} 件`), el('span', 'chev', collapsed ? '▸' : '▾'));
+  head.onclick = () => {
+    localStorage.setItem(LS_FOCUS, collapsed ? '0' : '1');
+    updateHud();
+    fitView();
+  };
   card.append(head);
+  if (collapsed) return;
   list.forEach((t) => {
     const r = el('div', 'focus-row');
     r.append(el('span', 'fdot ' + t.status), el('span', 'ft', t.title));
     if (t.owner !== leader().id) r.append(el('small', '', ownerName(t)));
     else if (t.due) r.append(el('small', isOverdue(t) ? 'late' : '', left(daysLeft(t.due))));
     r.onclick = () => showView({ type: 'person', id: t.owner });
+    if (canEdit()) {
+      const done = el('button', 'fdone', '✓');
+      done.type = 'button';
+      done.title = '標記完成';
+      done.setAttribute('aria-label', `把「${t.title}」標記完成`);
+      done.onclick = (e) => { e.stopPropagation(); completeTask(t.id); };
+      r.append(done);
+    }
     card.append(r);
   });
+}
+
+async function completeTask(id) {
+  const owner = board.tasks.find((y) => y.id === id)?.owner;
+  const ok = await mutate((b) => {
+    const x = b.tasks.find((y) => y.id === id);
+    if (!x || x.status === 'done') return null;
+    x.status = 'done';
+    x.doneAt = today();
+    x.updated = today();
+    delete x.focus; // frees a slot in today's three
+    return `「${x.title}」→ 完成（${b.people.find((p) => p.id === x.owner)?.name ?? ''}）`;
+  }, '🎉 完成了');
+  if (ok) celebrate(owner);
 }
 
 /* ---------- panels ---------- */
@@ -1114,7 +1391,7 @@ function taskEditor(t) {
   const note = field('text', '備註（卡關時寫原因）', t.note || '');
   const row = el('div', 'btn-row');
   row.append(
-    button('儲存', '', () => mutate((b) => {
+    button('儲存', '', async () => (await mutate((b) => {
       const x = b.tasks.find((y) => y.id === t.id);
       if (!x) return null;
       const before = x.status;
@@ -1129,7 +1406,7 @@ function taskEditor(t) {
       x.updated = today();
       const who = b.people.find((p) => p.id === x.owner)?.name ?? '';
       return before !== x.status ? `「${x.title}」→ ${STATUS[x.status].label}（${who}）` : `更新任務「${x.title}」（${who}）`;
-    })),
+    })) && status === 'done' && t.status !== 'done' && celebrate(owner.value)),
     button('刪除', 'danger', () => {
       if (confirm(`刪除任務「${t.title}」？`)) mutate((b) => { b.tasks = b.tasks.filter((y) => y.id !== t.id); return `刪除任務「${t.title}」`; }, '已刪除');
     }),
@@ -1359,6 +1636,13 @@ async function showReport() {
   group('卡關', w.blocked);
   group('逾期', w.overdue);
   group('接下來 7 天到期', w.nextDue);
+  const fri = thisFriday(), m = board.meetings[fri];
+  const meetRow = el('div', 'row click');
+  const mg = el('div', 'grow');
+  mg.append(el('div', 't', `📝 ${md(fri)} ${board.weekly.title}筆記`), el('div', 's', m?.submittedAt ? '已交給 Claude，週五會整理成大項' : m?.notes?.length ? `${m.notes.length} 則，還沒交給 Claude` : '還沒有筆記，點這裡去寫'));
+  meetRow.append(mg, el('span', 'tag ' + (m?.submittedAt ? 'doing' : 'todo'), m?.submittedAt ? '已交' : '未交'));
+  meetRow.onclick = () => showView({ type: 'calendar' });
+  body.append(el('div', 'sec', '週會'), meetRow);
   body.append(button('📋 複製週報文字', '', async () => {
     try { await navigator.clipboard.writeText(weekText(w)); toast('已複製，可以貼到訊息或信件'); } catch { toast('無法複製，請改用電腦'); }
   }));
@@ -1386,7 +1670,15 @@ async function showReport() {
       items.forEach((s) => ul.append(el('li', '', s)));
       return [el('div', 'sub', t), ul];
     };
-    archive.replaceChildren(tabs, el('div', 'summary', wk.summary || ''), ...list('完成', wk.done), ...list('卡關', wk.blocked), ...list('下週重點', wk.next));
+    const meet = [];
+    if (wk.meeting?.highlights?.length) {
+      // The big items from the Friday meeting come first.
+      meet.push(el('div', 'meet-report-head', `📝 週會重點（${md(wk.meeting.date)}）`));
+      const ol = el('ol', 'big-items');
+      wk.meeting.highlights.forEach((s) => ol.append(el('li', '', s)));
+      meet.push(ol, ...list('決議', wk.meeting.decisions), ...list('待辦', wk.meeting.actions));
+    }
+    archive.replaceChildren(tabs, el('div', 'summary', wk.summary || ''), ...meet, ...list('完成', wk.done), ...list('卡關', wk.blocked), ...list('下週重點', wk.next));
   };
   render(0);
 }
@@ -1394,17 +1686,21 @@ async function showReport() {
 /* ---------- calendar ---------- */
 async function showCalendar() {
   openPanel('會議廳', { type: 'calendar' });
-  body.append(el('div', 'muted', '讀取中…'));
-  const cal = await loadExtra('calendar');
+  body.append(meetingSection());
+  const events = el('div');
+  body.append(el('div', 'sec', 'Google 日曆'), events);
+  events.append(el('div', 'muted', '讀取中…'));
+  const [cal] = await Promise.all([loadExtra('calendar'), loadExtra('reports')]);
   if (currentView?.type !== 'calendar') return;
-  body.replaceChildren();
-  if (!cal) return body.append(el('div', 'muted', cal === false ? '行程檔的密碼和看板不同。' : '還沒有行程。每天早上排程會從 Google 日曆抓今天和明天的會議。'));
+  updateMeetingStatus();
+  events.replaceChildren();
+  if (!cal) return events.append(el('div', 'muted', cal === false ? '行程檔的密碼和看板不同。' : '還沒有行程。每天早上排程會從 Google 日曆抓今天和明天的會議。'));
   const days = (cal.days ?? []).filter((d) => d.date >= today());
-  if (!days.length) return body.append(el('div', 'muted', '今天和明天沒有行程資料，等明早排程更新。'));
+  if (!days.length) return events.append(el('div', 'muted', '今天和明天沒有行程資料，等明早排程更新。'));
   const nowHM = new Date().toTimeString().slice(0, 5);
   days.forEach((d) => {
-    body.append(el('div', 'sec', `${d.date === today() ? '今天' : d.date === addDays(today(), 1) ? '明天' : ''} ${md(d.date)} · ${d.events.length} 場`));
-    if (!d.events.length) body.append(el('div', 'muted', '沒有會議。'));
+    events.append(el('div', 'sub', `${d.date === today() ? '今天' : d.date === addDays(today(), 1) ? '明天' : ''} ${md(d.date)} · ${d.events.length} 場`));
+    if (!d.events.length) events.append(el('div', 'muted', '沒有會議。'));
     let marked = false;
     d.events.forEach((e) => {
       const r = el('div', 'row event'), time = el('div', 'time', e.start ? e.start : '全天'), g = el('div', 'grow');
@@ -1414,10 +1710,145 @@ async function showCalendar() {
       if (d.date === today() && !marked && e.start && (e.end || e.start) >= nowHM) { r.classList.add('next'); marked = true; }
       if (d.date === today() && e.end && e.end < nowHM) r.classList.add('past');
       r.append(time, g);
-      body.append(r);
+      events.append(r);
     });
   });
-  if (cal.generated) body.append(el('div', 'muted foot', `更新於 ${timeAgo(cal.generated)}`));
+  if (cal.generated) events.append(el('div', 'muted foot', `更新於 ${timeAgo(cal.generated)}`));
+}
+
+/* ---------- Friday meeting: notes for Claude to fold into the weekly report ---------- */
+const thisFriday = () => addDays(weekRange()[0], 4);
+const meetingDone = (fri) => (extra.reports?.weeks ?? []).some((w) => w.meeting?.date === fri);
+let meetingStatusNode = null;
+// This Friday's meeting: per-week overrides on top of the weekly default.
+function meetingOf(fri) {
+  const m = board.meetings[fri] ?? {};
+  return { time: m.time || board.weekly.time || '15:00', skip: !!m.skip, m };
+}
+function updateMeetingStatus() {
+  if (!meetingStatusNode) return;
+  const fri = thisFriday(), m = board.meetings[fri];
+  const [text, cls] = m?.skip ? ['這週不開', 'todo'] : meetingDone(fri) ? ['✓ 已彙整進週報', 'done']
+    : m?.submittedAt ? [`已交給 Claude（${timeAgo(m.submittedAt)}）`, 'doing']
+      : m?.notes?.length ? ['還沒交給 Claude', 'todo'] : ['還沒有筆記', 'todo'];
+  meetingStatusNode.textContent = text;
+  meetingStatusNode.className = 'tag ' + cls;
+}
+function pruneMeetings(b) {
+  const keep = Object.keys(b.meetings).sort().slice(-MAX_MEETINGS);
+  b.meetings = Object.fromEntries(keep.map((k) => [k, b.meetings[k]]));
+}
+
+function meetingSection() {
+  const fri = thisFriday(), wk = board.weekly, m = { notes: [], ...(board.meetings[fri] ?? {}) };
+  const { time, skip } = meetingOf(fri);
+  const box = el('div', 'meet' + (skip ? ' skipped' : ''));
+  const head = el('div', 'meet-head');
+  head.append(el('div', 'meet-title', `🗓️ 每週五 ${wk.title} · ${wk.time || '15:00'}`));
+  meetingStatusNode = el('span', 'tag');
+  head.append(meetingStatusNode);
+  box.append(head);
+  const week = el('div', 'meet-week');
+  week.append(el('b', '', skip ? `本週 ${md(fri)}：這週不開` : `本週 ${md(fri)} 週五 ${time}`), el('span', 'muted', skip ? '' : `（${left(daysLeft(fri))}）`));
+  if (m.time && !skip) week.append(el('span', 'tag doing', '這週改時間'));
+  box.append(week);
+  if (wk.remind !== false && !skip) box.append(el('div', 'muted small', `⏰ 會前 30 分鐘提醒你；開完一小時後提醒你交筆記。`));
+  if (canEdit()) {
+    // This week only: move the meeting or skip it.
+    const ctl = el('div', 'meet-ctl');
+    const tm = field('time', '', time);
+    tm.classList.add('inline');
+    ctl.append(
+      tm,
+      button('改這週時間', 'small', () => {
+        if (!tm.value) return tm.focus();
+        mutate((b) => {
+          b.meetings[fri] = { notes: [], ...(b.meetings[fri] ?? {}), time: tm.value === (b.weekly.time || '15:00') ? undefined : tm.value, skip: undefined };
+          pruneMeetings(b);
+          return `本週${b.weekly.title}改到 ${md(fri)} ${tm.value}`;
+        }, `本週改到 ${tm.value}`);
+      }),
+      button(skip ? '恢復這週週會' : '這週不開', 'small' + (skip ? '' : ' danger'), () => {
+        mutate((b) => {
+          b.meetings[fri] = { notes: [], ...(b.meetings[fri] ?? {}), skip: skip ? undefined : true };
+          pruneMeetings(b);
+          return skip ? `恢復本週${b.weekly.title}（${md(fri)}）` : `本週${b.weekly.title}不開（${md(fri)}）`;
+        }, skip ? '已恢復本週週會' : '這週不開，不會提醒你');
+      }),
+    );
+    box.append(ctl);
+  }
+  updateMeetingStatus();
+
+  box.append(el('div', 'sub', `週會筆記（${m.notes.length}）`));
+  if (!m.notes.length) box.append(el('div', 'muted', '開完會把統整寫在這裡：重點、決議、誰要做什麼。交給 Claude 後，週五的週報會整理成大項。'));
+  m.notes.forEach((n) => {
+    const r = el('div', 'note');
+    r.append(el('div', 'note-text', n.text), el('div', 's', timeAgo(n.at)));
+    if (canEdit()) {
+      const del = el('button', 'x', '✕');
+      del.type = 'button';
+      del.setAttribute('aria-label', '刪除這則筆記');
+      del.onclick = () => {
+        if (confirm('刪除這則筆記？')) mutate((b) => {
+          const mm = b.meetings[fri];
+          if (mm) mm.notes = mm.notes.filter((y) => y.id !== n.id);
+          return `刪除一則週會筆記（${md(fri)}）`;
+        }, '已刪除');
+      };
+      r.append(del);
+    }
+    box.append(r);
+  });
+
+  if (!canEdit()) { box.append(editHint()); return box; }
+  const text = el('textarea', 'field note-input');
+  text.rows = 5;
+  text.maxLength = 4000;
+  text.placeholder = '例如：\n1. PCB 改版延到下週三\n2. 決議：LED 改用備援供應商\n3. 阿哲 週二前回報良率';
+  const row = el('div', 'btn-row');
+  row.append(
+    button('＋ 加入筆記', 'ghost', () => {
+      const v = text.value.trim();
+      if (!v) return text.focus();
+      mutate((b) => {
+        b.meetings[fri] = b.meetings[fri] ?? { notes: [] };
+        b.meetings[fri].notes.push({ id: uid(), text: v, at: new Date().toISOString() });
+        pruneMeetings(b);
+        return `新增週會筆記（${md(fri)}）`;
+      }, '筆記已加入');
+    }),
+    button('📤 交給 Claude 彙整', '', () => {
+      const v = text.value.trim();
+      if (!v && !m.notes.length) return text.focus();
+      mutate((b) => {
+        b.meetings[fri] = b.meetings[fri] ?? { notes: [] };
+        if (v) b.meetings[fri].notes.push({ id: uid(), text: v, at: new Date().toISOString() });
+        b.meetings[fri].submittedAt = new Date().toISOString();
+        pruneMeetings(b);
+        return `週會筆記交給 Claude 彙整（${md(fri)}）`;
+      }, '已交給 Claude，週報排程會整理成大項');
+    }),
+  );
+  box.append(text, row, el('div', 'muted small', '週五 18:00 週報排程會讀取已交的筆記。想馬上整理：在 Claude app 的「Scheduled」找到「每週五週報」按 Run now。'));
+
+  const more = el('details', 'meet-settings');
+  more.append(el('summary', '', '週會設定'));
+  const t = field('text', '名稱（例如：週會）', wk.title);
+  const tm = field('time', '', wk.time || '15:00');
+  const rem = el('label', 'check');
+  const cb = el('input');
+  cb.type = 'checkbox';
+  cb.checked = wk.remind !== false;
+  rem.append(cb, el('span', '', '開會前 30 分鐘提醒我、會後提醒交筆記'));
+  more.append(el('div', 'sub', '名稱'), t, el('div', 'sub', '每週五預設時間'), tm, rem, button('儲存設定', 'ghost', () => {
+    const title = t.value.trim() || '週會';
+    const time = tm.value || '15:00';
+    mutate((b) => { b.weekly = { ...b.weekly, title, time, remind: cb.checked }; return `週會設定：每週五 ${title} ${time}${cb.checked ? '' : '（不提醒）'}`; });
+  }));
+  more.append(el('div', 'muted small', '提醒支援 08:30–19:30 之間的時間。'));
+  box.append(more);
+  return box;
 }
 
 /* ---------- settings ---------- */
@@ -1541,6 +1972,18 @@ function renderDigest(index) {
     body.append(box);
   });
 }
+
+// Local preview only: expose the traffic for automated checks.
+if (isLocal) window.__city = { get cars() { return cars; }, get walkers() { return walkers; } };
+
+// Keep time-based bits (meeting banner, countdowns) current while the page stays open.
+setInterval(() => {
+  if (!board) return;
+  const before = $('#hud').offsetHeight;
+  updateHud();
+  updateCivicLabels();
+  if ($('#hud').offsetHeight !== before) fitView();
+}, 60000);
 
 /* ---------- unlock ---------- */
 async function unlock(pw) {
