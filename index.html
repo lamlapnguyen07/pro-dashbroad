@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="robots" content="noindex, nofollow">
 <meta name="theme-color" content="#eef1f5">
-<title>3D 專案看板</title>
+<title>團隊看板</title>
 <link rel="stylesheet" href="style.css">
 <script type="importmap">
 {
@@ -20,16 +20,17 @@
 <canvas id="scene"></canvas>
 <div id="labels"></div>
 
-<header id="hud">
-  <div class="hud-code" id="hud-code"></div>
-  <h1 id="hud-title">載入中…</h1>
+<header id="hud" hidden>
+  <div class="hud-code">TEAM BOARD</div>
+  <h1 id="hud-title"></h1>
   <div class="chips" id="hud-chips"></div>
 </header>
 
-<nav id="nav">
+<nav id="nav" hidden>
   <button data-view="dashboard">📊 總覽</button>
   <button data-view="team">👥 團隊</button>
-  <button data-view="mail">✉️ 信件 <span class="badge" id="mail-badge" hidden></span></button>
+  <button data-view="mail">✉️ 信件</button>
+  <button data-view="settings" class="icon" aria-label="設定">⚙️</button>
 </nav>
 
 <aside id="panel" hidden>
@@ -39,6 +40,20 @@
   </div>
   <div id="panel-body"></div>
 </aside>
+
+<div id="lock">
+  <form class="lock-card" id="lock-form">
+    <div class="ico">🔒</div>
+    <h2>團隊看板</h2>
+    <div class="muted">內容已加密，只在這台裝置上解開。</div>
+    <input class="field" id="lock-pw" type="password" placeholder="輸入密碼" autocomplete="current-password">
+    <label class="remember"><input type="checkbox" id="lock-remember"> 在這台裝置記住密碼</label>
+    <button class="btn" type="submit" id="lock-btn">解鎖</button>
+    <div class="err" id="lock-err"></div>
+  </form>
+</div>
+
+<div id="toast"></div>
 
 <script type="module" src="app.js"></script>
 </body>
