@@ -144,3 +144,10 @@ ul.plain { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; }
 .event.next { background: #eaf7f6; margin: 0 -8px; padding-left: 8px; padding-right: 8px; border-radius: 10px; }
 .event.past { opacity: .5; }
 .foot { margin-top: 14px; }
+.t.picked { font-size: 16px; font-weight: 800; }
+.seg.styles { margin-top: 6px; }
+@media (max-width: 420px) {
+  #nav { gap: 6px; }
+  #nav button { padding: 10px 11px; font-size: 12px; }
+  #nav button.icon { padding: 10px 10px; }
+}

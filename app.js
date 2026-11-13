@@ -119,6 +119,9 @@ function normalize(d) {
     tasks: Array.isArray(d.tasks) ? d.tasks : [],
     milestones: Array.isArray(d.milestones) ? d.milestones : [],
     log: Array.isArray(d.log) ? d.log : [],
+    layout: d.layout && typeof d.layout === 'object' && !Array.isArray(d.layout) ? d.layout : {},
+    // A city starts with one plaza; after that the user decides.
+    decor: Array.isArray(d.decor) ? d.decor.filter((x) => x && (x.type === 'plaza' || x.type === 'park')) : [{ id: 'plaza', type: 'plaza' }],
   };
   if (!b.people.some((p) => p.kind === 'leader')) b.people.unshift({ id: 'me', name: '我', role: 'Leader', color: '#5b8def', kind: 'leader' });
   if (!b.people.some((p) => p.kind === 'claude')) b.people.push({ id: 'claude', name: 'Claude', role: 'AI 助理', color: '#d97757', kind: 'claude' });
@@ -189,7 +192,7 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xeef1f5);
-const camera = new THREE.OrthographicCamera(-10, 10, 10, -10, 0.1, 400);
+const camera = new THREE.OrthographicCamera(-10, 10, 10, -10, 0.1, 500);
 camera.position.set(60, 60, 60);
 camera.lookAt(0, 0, 0);
 
@@ -198,12 +201,12 @@ const sun = new THREE.DirectionalLight(0xffffff, 1.9);
 sun.position.set(-18, 40, 22);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
-Object.assign(sun.shadow.camera, { left: -55, right: 55, top: 55, bottom: -55, near: 1, far: 140 });
 sun.shadow.bias = -0.0005;
 scene.add(sun);
 
 const city = new THREE.Group();
 scene.add(city);
+const WHITE = new THREE.Color(0xffffff);
 const mat = (color, extraProps = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.85, ...extraProps });
 const place = (mesh, x, y, z, parent) => {
   mesh.position.set(x, y, z);
@@ -213,204 +216,527 @@ const place = (mesh, x, y, z, parent) => {
 };
 const box = (w, h, d, m, x, y, z, parent = city) => place(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m), x, y, z, parent);
 const cyl = (r, h, m, x, y, z, parent = city, seg = 12) => place(new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, seg), m), x, y, z, parent);
+const ball = (r, m, x, y, z, parent = city) => place(new THREE.Mesh(new THREE.SphereGeometry(r, 14, 10), m), x, y, z, parent);
+// Triangular prism lying along x (a gable roof): `depth` wide along z, `height` tall.
+function prism(len, depth, height, m, x, y, z, parent = city) {
+  const shape = new THREE.Shape([new THREE.Vector2(-depth / 2, 0), new THREE.Vector2(depth / 2, 0), new THREE.Vector2(0, height)]);
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: len, bevelEnabled: false });
+  geo.rotateY(Math.PI / 2);
+  geo.translate(-len / 2, 0, 0);
+  return place(new THREE.Mesh(geo, m), x, y, z, parent);
+}
+const hash = (s) => [...String(s)].reduce((a, c) => (Math.imul(a, 31) + c.charCodeAt(0)) | 0, 7) >>> 0;
+function rng(seed) {
+  let a = seed >>> 0;
+  return () => { a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+
+/* ---------- city layout: a grid of blocks separated by two-way streets ---------- */
+const S = 10;        // block pitch
+const TILE = 8.4;    // block incl. sidewalk
+const WALK = 3.95;   // sidewalk line, from block centre
+const ROAD = 1.6;
+const CIVIC = ['mail', 'calendar', 'report', 'milestone'];
+const CIVIC_NAME = { mail: '郵局', calendar: '會議廳', report: '週報塔', milestone: '鐘塔' };
+const STYLES = { tower: '大樓', stack: '階梯大樓', glass: '玻璃塔', studio: '工作室', factory: '工廠' };
+const DECOR = { plaza: '⛲ 廣場', park: '🌳 公園' };
+const styleOf = (p) => (STYLES[p.style] ? p.style : p.kind === 'leader' ? 'tower' : p.kind === 'claude' ? 'glass' : ['stack', 'studio', 'factory', 'tower', 'glass'][hash(p.id) % 5]);
+const itemName = (key) => person(key)?.name ?? CIVIC_NAME[key] ?? DECOR[draftOrBoard().decor.find((d) => 'd:' + d.id === key)?.type] ?? '';
+
+let layoutMode = false, draft = null, picked = null;
+const draftOrBoard = () => draft || { layout: board.layout, decor: board.decor };
+
+function placement(pad) {
+  const src = draftOrBoard();
+  const keys = [...board.people.map((p) => p.id), ...src.decor.map((d) => 'd:' + d.id), ...CIVIC];
+  const pos = new Map(), used = new Set();
+  for (const k of keys) {
+    const v = src.layout?.[k];
+    if (Array.isArray(v) && Number.isInteger(v[0]) && Number.isInteger(v[1]) && !used.has(v.join())) { pos.set(k, [v[0], v[1]]); used.add(v.join()); }
+  }
+  if (!pos.size) {
+    // Default: the first plaza in the middle, everyone else row by row around it.
+    const cols = Math.max(3, Math.ceil(Math.sqrt(keys.length)));
+    const rows = Math.ceil(keys.length / cols);
+    const centre = [Math.floor((cols - 1) / 2), Math.floor((rows - 1) / 2)];
+    const plaza = keys.find((k) => k.startsWith('d:'));
+    if (plaza) { pos.set(plaza, centre); used.add(centre.join()); }
+    let i = 0;
+    for (const k of keys) {
+      if (pos.has(k)) continue;
+      while (used.has([i % cols, Math.floor(i / cols)].join())) i++;
+      const c = [i % cols, Math.floor(i / cols)];
+      pos.set(k, c); used.add(c.join());
+    }
+  }
+  for (const k of keys) {
+    if (pos.has(k)) continue;
+    const all = [...pos.values()];
+    const [minC, maxC] = [Math.min(...all.map((p) => p[0])), Math.max(...all.map((p) => p[0]))];
+    const [minR, maxR] = [Math.min(...all.map((p) => p[1])), Math.max(...all.map((p) => p[1]))];
+    let cell = null;
+    for (let r = minR; r <= maxR && !cell; r++) for (let c = minC; c <= maxC && !cell; c++) if (!used.has([c, r].join())) cell = [c, r];
+    cell = cell || [minC, maxR + 1];
+    pos.set(k, cell); used.add(cell.join());
+  }
+  const all = [...pos.values()];
+  const minC = Math.min(...all.map((p) => p[0])), minR = Math.min(...all.map((p) => p[1]));
+  const cols = Math.max(...all.map((p) => p[0])) - minC + 1 + pad * 2;
+  const rows = Math.max(...all.map((p) => p[1])) - minR + 1 + pad * 2;
+  for (const [k, p] of pos) pos.set(k, [p[0] - minC + pad, p[1] - minR + pad]);
+  return { pos, cols, rows, pad, minC, minR };
+}
 
 const labelLayer = $('#labels');
-let pickables = [], animated = [], labels = [], rings = new Map(), parcels = [], civicLabel = {};
-let dims = { W: 28, zMin: -9, zMax: 13, street: 5.4 };
+let pickables = [], animated = [], labels = [], rings = new Map(), civicLabel = {}, cars = [], walkers = [], spots = [];
+let dims = { W: 40, D: 40, coreW: 32, coreD: 32 };
 
 function clearCity() {
   city.traverse((o) => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
   city.clear();
   labelLayer.replaceChildren();
-  pickables = []; animated = []; labels = []; rings = new Map(); parcels = []; civicLabel = {};
+  pickables = []; animated = []; labels = []; rings = new Map(); civicLabel = {}; cars = []; walkers = []; spots = [];
 }
 function addLabel(node, pos, id) {
   labelLayer.append(node);
   labels.push({ node, pos, id });
   return node;
 }
-function civic(x, z, action, build, labelText, labelY) {
-  const g = new THREE.Group();
-  g.position.set(x, 0, z);
-  city.add(g);
-  build(g).forEach((m) => { m.userData.action = action; pickables.push(m); });
-  civicLabel[action] = addLabel(el('div', 'label civic', labelText), g.position.clone().add(new THREE.Vector3(0, labelY, 0)));
-}
 
 function buildCity() {
   clearCity();
-  const people = board.people, S = 10, n = people.length;
-  const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(n))));
-  const rows = Math.max(1, Math.ceil(n / cols));
-  const half = ((rows - 1) / 2) * S;
-  const W = (cols - 1) * S + 18, zMin = -half - 9, zMax = half + 13.5;
-  const street = half + 5.4, plaza = half + 9.6;
-  dims = { W, zMin, zMax, street };
+  const pl = placement(layoutMode ? 1 : 0);
+  const { cols, rows } = pl;
+  const W = cols * S + 8, D = rows * S + 8;
+  dims = { W, D, coreW: cols * S + ROAD, coreD: rows * S + ROAD };
+  Object.assign(sun.shadow.camera, { left: -W, right: W, top: W, bottom: -W, near: 1, far: 220 });
+  sun.shadow.camera.updateProjectionMatrix();
+  const centre = (c, r) => [(c - (cols - 1) / 2) * S, (r - (rows - 1) / 2) * S];
 
-  box(W, 0.4, zMax - zMin, mat(0xe2e7ee), 0, -0.2, (zMin + zMax) / 2).castShadow = false;
-  const roadMat = mat(0xc9d0d9);
-  const road = (w, d, x, z) => { box(w, 0.1, d, roadMat, x, 0.05, z).castShadow = false; };
-  road(W - 2, 1.2, 0, street);
-  for (let c = 0; c < cols - 1; c++) road(1.2, street - zMin - 1, (c + 0.5 - (cols - 1) / 2) * S, (zMin + 1 + street) / 2);
-  for (let r = 0; r < rows - 1; r++) road(W - 2, 1.2, 0, (r + 0.5 - (rows - 1) / 2) * S);
+  // Grass, then asphalt streets on every block edge with dashed centre lines.
+  box(W, 0.3, D, mat(0xcfe3c6), 0, -0.15, 0).castShadow = false;
+  const asphalt = mat(0x8e98a5);
+  const xs = Array.from({ length: cols + 1 }, (_, i) => (i - cols / 2) * S);
+  const zs = Array.from({ length: rows + 1 }, (_, j) => (j - rows / 2) * S);
+  zs.forEach((z) => { box(cols * S + ROAD, 0.08, ROAD, asphalt, 0, 0.04, z).castShadow = false; });
+  xs.forEach((x) => { box(ROAD, 0.08, rows * S + ROAD, asphalt, x, 0.04, 0).castShadow = false; });
+  const dashes = [];
+  zs.forEach((z) => { for (let x = -cols * S / 2 + 1.6; x < cols * S / 2 - 1; x += 1.8) if (xs.every((xx) => Math.abs(x - xx) > 1.2)) dashes.push([x, z, 0]); });
+  xs.forEach((x) => { for (let z = -rows * S / 2 + 1.6; z < rows * S / 2 - 1; z += 1.8) if (zs.every((zz) => Math.abs(z - zz) > 1.2)) dashes.push([x, z, 1]); });
+  const dashMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.8, 0.02, 0.1), mat(0xf4f6f8), dashes.length);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), one = new THREE.Vector3(1, 1, 1);
+  dashes.forEach(([x, z, vert], i) => {
+    q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), vert ? Math.PI / 2 : 0);
+    dashMesh.setMatrixAt(i, m4.compose(new THREE.Vector3(x, 0.09, z), q, one));
+  });
+  city.add(dashMesh);
 
-  people.forEach((p, i) => buildLot(p, new THREE.Vector3((i % cols - (cols - 1) / 2) * S, 0, (Math.floor(i / cols) - (rows - 1) / 2) * S)));
+  // Blocks.
+  const occupied = new Set();
+  for (const [key, [c, r]] of pl.pos) {
+    occupied.add(c + ',' + r);
+    const [x, z] = centre(c, r);
+    const g = new THREE.Group();
+    g.position.set(x, 0, z);
+    city.add(g);
+    const ring = box(TILE + 0.5, 0.2, TILE + 0.5, mat(0x1f2733), 0, 0.1, 0, g);
+    ring.castShadow = false;
+    ring.visible = false;
+    rings.set(key, ring);
+    const parts = [box(TILE, 0.22, TILE, mat(0xe3e7ec), 0, 0.11, 0, g)];
+    const p = person(key);
+    if (p) parts.push(...buildLot(p, g));
+    else if (key.startsWith('d:')) {
+      const d = draftOrBoard().decor.find((y) => 'd:' + y.id === key);
+      parts.push(...(d.type === 'park' ? buildPark(g, hash(key)) : buildPlaza(g, hash(key))));
+    } else parts.push(...buildCivic(key, g));
+    parts.forEach((m) => { m.userData.key = key; pickables.push(m); });
+  }
+  // Empty blocks: grass with a tree, or (while arranging) a drop target.
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    if (occupied.has(c + ',' + r)) continue;
+    const [x, z] = centre(c, r);
+    if (layoutMode) {
+      const slot = box(TILE, 0.12, TILE, mat(0xffffff, { transparent: true, opacity: 0.55 }), x, 0.06, z);
+      slot.castShadow = false;
+      slot.userData.cell = [c, r];
+      pickables.push(slot);
+    } else {
+      box(TILE, 0.22, TILE, mat(0xbfdcb4), x, 0.11, z).castShadow = false;
+      roundTree(x - 1.5, z + 1, 1.1);
+      roundTree(x + 2, z - 1.8, 0.9);
+    }
+  }
+  // Trees around the edge of town.
+  const rand = rng(cols * 97 + rows);
+  for (let x = -W / 2 + 1.5; x <= W / 2 - 1.5; x += 3.2) for (const z of [-D / 2 + 1.6, D / 2 - 1.6]) if (rand() < 0.8) (rand() < 0.5 ? coneTree : roundTree)(x + rand() - 0.5, z, 0.8 + rand() * 0.4);
+  for (let z = -D / 2 + 4.5; z <= D / 2 - 4.5; z += 3.2) for (const x of [-W / 2 + 1.6, W / 2 - 1.6]) if (rand() < 0.8) (rand() < 0.5 ? coneTree : roundTree)(x, z + rand() - 0.5, 0.8 + rand() * 0.4);
 
-  // Civic buildings on the plaza in front of the main street.
-  const x0 = -W / 2 + 3.5, x1 = W / 2 - 3.5, at = (f) => x0 + (x1 - x0) * f;
-  civic(at(0), plaza, 'mail', (g) => [
-    box(0.3, 1.2, 0.3, mat(0x55606f), 0, 0.6, 0, g), box(1.5, 1, 1.1, mat(0xe5584f), 0, 1.7, 0, g), box(1.1, 0.12, 0.05, mat(0xffffff), 0, 1.8, 0.58, g),
-  ], '✉️ 信件', 3);
-  civic(at(0.32), plaza, 'calendar', buildHall, '📅 會議', 4.2);
-  civic(at(0.64), plaza, 'report', buildReportTower, '📈 週報', 5.4);
-  civic(at(1), plaza, 'milestone', buildClockTower, '⏰ 里程碑', 6.6);
+  spawnTraffic(xs, zs, cols, rows);
+  spawnWalkers();
   updateCivicLabels();
-
-  const tree = (x, z) => {
-    box(0.35, 0.9, 0.35, mat(0x8a6f55), x, 0.45, z);
-    place(new THREE.Mesh(new THREE.ConeGeometry(1.1, 2.4, 6), mat(0x7cc29a)), x, 2.1, z, city);
-  };
-  const tx = W / 2 - 1.4;
-  [[-tx, zMin + 1.5], [tx, zMin + 1.5], [-tx, 0], [tx, 0]].forEach(([x, z]) => tree(x, z));
-
-  for (let k = 0; k < 3; k++) parcels.push({ mesh: box(0.55, 0.55, 0.55, mat(0x1f2733), 0, 0.42, street), t: k / 3 });
 }
 
-function buildLot(p, pos) {
+function coneTree(x, z, s = 1, parent = city) {
+  cyl(0.15 * s, 0.8 * s, mat(0x8a6f55), x, 0.4 * s, z, parent, 6);
+  place(new THREE.Mesh(new THREE.ConeGeometry(0.9 * s, 2 * s, 7), mat(0x6fb98a)), x, 1.7 * s, z, parent);
+}
+function roundTree(x, z, s = 1, parent = city) {
+  cyl(0.13 * s, 0.9 * s, mat(0x8a6f55), x, 0.45 * s, z, parent, 6);
+  ball(0.75 * s, mat(0x86c98f), x, 1.4 * s, z, parent);
+  ball(0.5 * s, mat(0x9bd6a2), x + 0.35 * s, 1.75 * s, z + 0.2 * s, parent);
+}
+function bench(x, z, ry, parent) {
   const g = new THREE.Group();
-  g.position.copy(pos);
-  city.add(g);
+  g.position.set(x, 0, z);
+  g.rotation.y = ry;
+  parent.add(g);
+  box(1.1, 0.08, 0.35, mat(0xa0714f), 0, 0.45, 0, g);
+  box(1.1, 0.3, 0.06, mat(0xa0714f), 0, 0.65, -0.17, g);
+  for (const dx of [-0.45, 0.45]) box(0.06, 0.42, 0.3, mat(0x55606f), dx, 0.21, 0, g);
+}
+function lamp(x, z, parent) {
+  cyl(0.05, 1.8, mat(0x55606f), x, 0.9, z, parent, 6);
+  ball(0.16, mat(0xfff1c7, { emissive: 0xffd98a, emissiveIntensity: 0.7 }), x, 1.85, z, parent);
+}
+
+/* ---------- people's buildings ---------- */
+function buildLot(p, g) {
   const color = new THREE.Color(safeColor(p.color));
-  const light = color.clone().lerp(new THREE.Color(0xffffff), 0.75);
   const mine = tasksOf(p.id);
   const open = mine.filter((t) => t.status !== 'done').length;
-  const parts = [];
-
-  const ring = box(7.4, 0.2, 7.4, mat(0x1f2733), 0, 0.1, 0, g);
-  ring.castShadow = false;
-  ring.visible = false;
-  rings.set(p.id, ring);
-  parts.push(box(6.6, 0.5, 6.6, mat(light), 0, 0.25, 0, g));
-
-  // Building height = open workload; the leader's HQ is a bit taller.
-  const h = 1.2 + Math.min(open, 8) * 0.45 + (p.kind === 'leader' ? 0.8 : 0);
-  parts.push(box(2.4, h, 2.4, mat(color), -1.7, 0.5 + h / 2, -1.7, g));
-  parts.push(box(2.7, 0.22, 2.7, mat(0xffffff), -1.7, 0.5 + h + 0.11, -1.7, g));
-  parts.push(box(0.6, 0.9, 0.08, mat(0xffffff), -1.7, 0.95, -0.46, g));
-  for (let y = 1.9; y < 0.5 + h - 0.4; y += 0.9) {
-    parts.push(box(1.6, 0.35, 0.06, mat(0xdbe7f5), -1.7, y, -0.47, g));
-    parts.push(box(0.06, 0.35, 1.6, mat(0xdbe7f5), -0.47, y, -1.7, g));
-  }
-  let top = 0.5 + h + 0.22;
+  const parts = [box(TILE - 1, 0.3, TILE - 1, mat(color.clone().lerp(WHITE, 0.78)), 0, 0.25, 0, g)];
+  // Height = open workload; the leader's HQ is a bit taller.
+  const h = 1.6 + Math.min(open, 8) * 0.5 + (p.kind === 'leader' ? 0.8 : 0);
+  const b = buildingStyle(styleOf(p), g, color, h);
+  parts.push(...b.parts);
+  let top = b.top;
   if (p.kind === 'leader') {
-    parts.push(cyl(0.06, 1.8, mat(0x55606f), -1.7, top + 0.9, -1.7, g));
-    const flag = box(1, 0.6, 0.06, mat(color), -1.18, top + 1.45, -1.7, g);
+    parts.push(cyl(0.06, 1.8, mat(0x55606f), -1.9, top + 0.9, -1.9, g));
+    const flag = box(1, 0.6, 0.06, mat(color), -1.38, top + 1.45, -1.9, g);
     parts.push(flag);
     animated.push({ type: 'flag', mesh: flag });
     top += 1.8;
   } else if (p.kind === 'claude') {
-    parts.push(cyl(0.08, 1.1, mat(0x55606f), -1.7, top + 0.55, -1.7, g));
-    const bulb = place(new THREE.Mesh(new THREE.SphereGeometry(0.34, 18, 12), mat(color, { emissive: color, emissiveIntensity: 0.5 })), -1.7, top + 1.3, -1.7, g);
+    parts.push(cyl(0.08, 1.1, mat(0x55606f), -1.9, top + 0.55, -1.9, g));
+    const bulb = ball(0.34, mat(color, { emissive: color, emissiveIntensity: 0.5 }), -1.9, top + 1.3, -1.9, g);
     parts.push(bulb);
     animated.push({ type: 'glow', mesh: bulb });
     top += 1.6;
   }
-
-  // One crate per task (up to 18), most urgent first; focus tasks get a star on top.
+  // One crate per task (up to 18), most urgent first; focus tasks get a spinning star.
   sortTasks(mine).slice(0, 18).forEach((t, k) => {
     const m = mat(STATUS[t.status].color, t.status === 'blocked' ? { emissive: 0xe5584f, emissiveIntensity: 0 } : {});
-    const crate = box(0.78, 0.78, 0.78, m, 0.6 + (k % 3), 0.89, -2.5 + Math.floor(k / 3), g);
+    const crate = box(0.78, 0.78, 0.78, m, 1.0 + (k % 3), 0.79, -2.9 + Math.floor(k / 3), g);
     parts.push(crate);
     if (t.status === 'doing') animated.push({ type: 'bob', mesh: crate, phase: k });
     if (t.status === 'blocked') animated.push({ type: 'pulse', mesh: crate });
-    if (t.focus && t.status !== 'done') {
-      const star = place(new THREE.Mesh(new THREE.OctahedronGeometry(0.22), mat(0xffc93c, { emissive: 0xffb000, emissiveIntensity: 0.6 })), 0, 0.68, 0, crate);
-      animated.push({ type: 'spin', mesh: star });
-    }
+    if (t.focus && t.status !== 'done') animated.push({ type: 'spin', mesh: place(new THREE.Mesh(new THREE.OctahedronGeometry(0.22), mat(0xffc93c, { emissive: 0xffb000, emissiveIntensity: 0.6 })), 0, 0.68, 0, crate) });
   });
-  parts.forEach((m) => { m.userData.person = p.id; pickables.push(m); });
+  roundTree(-3.1, 3.0, 0.75, g);
+  lamp(-0.4, 3.2, g);
+  spots.push({ x: g.position.x - 1.9, z: g.position.z - 0.1, cx: g.position.x, cz: g.position.z, enter: true });
 
   const label = el('div', 'label');
   const dot = el('span', 'dot');
   dot.style.background = safeColor(p.color);
   label.append(dot, el('span', '', p.name), el('small', '', `${mine.filter((t) => t.status === 'done').length}/${mine.length}`));
   if (mine.some((t) => t.status === 'blocked' || isOverdue(t))) label.append(el('span', 'warn', '!'));
-  addLabel(label, g.position.clone().add(new THREE.Vector3(-1.7, top + 0.5, -1.7)), p.id);
-}
-
-function buildHall(g) {
-  const parts = [
-    box(4.6, 0.3, 3.4, mat(0xd5ecea), 0, 0.15, 0, g),
-    box(3.8, 1.5, 2, mat(0xffffff), 0, 1.05, -0.4, g),
-    box(4.2, 0.18, 2.9, mat(0xe9eef2), 0, 1.89, 0, g),
-  ];
-  for (const x of [-1.6, -0.55, 0.55, 1.6]) parts.push(cyl(0.13, 1.5, mat(0xf4f6f8), x, 1.05, 1.1, g));
-  const roof = place(new THREE.Mesh(new THREE.CylinderGeometry(1.25, 1.25, 4.3, 3), mat(0x3fb6b2)), 0, 2.35, 0, g);
-  roof.rotation.set(0, 0, Math.PI / 2);
-  roof.rotation.x = -Math.PI / 2;
-  roof.scale.set(1, 1, 0.42);
-  parts.push(roof, box(0.9, 1, 0.08, mat(0x3fb6b2), 0, 0.8, 0.62, g));
+  addLabel(label, g.position.clone().add(new THREE.Vector3(-1.9, top + 0.5, -1.9)), p.id);
   return parts;
 }
 
-function buildReportTower(g) {
-  const purple = mat(0x8e6bd6), win = mat(0xe8defc);
-  const parts = [box(2.6, 0.3, 2.6, mat(0xe6def6), 0, 0.15, 0, g)];
-  [[2, 1.3], [1.6, 1.2], [1.2, 1.1]].reduce((y, [s, h]) => {
-    parts.push(box(s, h, s, purple, 0, y + h / 2, 0, g), box(s * 0.7, 0.3, 0.06, win, 0, y + h / 2, s / 2 + 0.01, g), box(0.06, 0.3, s * 0.7, win, s / 2 + 0.01, y + h / 2, 0, g));
-    return y + h;
-  }, 0.3);
-  const top = 0.3 + 1.3 + 1.2 + 1.1;
-  [[0x5b8def, 0.5], [0xf2a93b, 0.8], [0x4caf7d, 1.15]].forEach(([c, h], i) => {
-    const b = box(0.26, h, 0.26, mat(c), -0.35 + i * 0.35, top + h / 2, 0, g);
-    parts.push(b);
-    animated.push({ type: 'grow', mesh: b, base: top, h, phase: i });
-  });
+function buildingStyle(style, g, color, h) {
+  const X = -1.9, Z = -1.9, F = 2.8, base = 0.4;
+  const parts = [], win = mat(0xdbe7f5), body = mat(color), dark = mat(color.clone().lerp(new THREE.Color(0x1f2733), 0.35));
+  const strips = (x, z, w, d, y0, y1) => {
+    for (let y = y0 + 0.75; y < y1 - 0.35; y += 0.85) {
+      parts.push(box(w * 0.72, 0.32, 0.06, win, x, y, z + d / 2 + 0.01, g), box(0.06, 0.32, d * 0.72, win, x + w / 2 + 0.01, y, z, g));
+    }
+  };
+  let top;
+  if (style === 'stack') {
+    let y = base;
+    [[F, 0.45], [F * 0.76, 0.33], [F * 0.52, 0.22]].forEach(([f, k]) => {
+      const th = Math.max(0.8, h * k);
+      parts.push(box(f, th, f, body, X, y + th / 2, Z, g), box(f + 0.12, 0.12, f + 0.12, mat(0xffffff), X, y + th, Z, g));
+      strips(X, Z, f, f, y, y + th);
+      y += th + 0.12;
+    });
+    top = y;
+  } else if (style === 'glass') {
+    const r = F / 2;
+    parts.push(cyl(r, h, mat(color.clone().lerp(WHITE, 0.2), { roughness: 0.25, metalness: 0.15 }), X, base + h / 2, Z, g, 28));
+    for (let y = base + 0.8; y < base + h - 0.2; y += 0.8) parts.push(cyl(r + 0.04, 0.09, mat(0xf4f7fb), X, y, Z, g, 28));
+    parts.push(cyl(r * 0.82, 0.25, mat(0xffffff), X, base + h + 0.12, Z, g, 28));
+    top = base + h + 0.25;
+  } else if (style === 'studio') {
+    const w = F * 1.25, bh = Math.max(1.4, h * 0.6);
+    parts.push(box(w, bh, F, body, X + 0.3, base + bh / 2, Z, g));
+    parts.push(prism(w + 0.3, F + 0.4, 1.1, dark, X + 0.3, base + bh, Z, g));
+    parts.push(box(w * 0.55, bh * 0.45, 0.06, win, X + 0.75, base + bh * 0.55, Z + F / 2 + 0.01, g));
+    parts.push(box(0.06, bh * 0.4, F * 0.6, win, X + 0.3 + w / 2 + 0.01, base + bh * 0.55, Z, g));
+    top = base + bh + 1.1;
+  } else if (style === 'factory') {
+    const w = F * 1.2, bh = Math.max(1.4, h * 0.6);
+    parts.push(box(w, bh, F, body, X + 0.2, base + bh / 2, Z, g));
+    for (let i = 0; i < 3; i++) parts.push(prism(F, w / 3, 0.6, dark, X + 0.2 - w / 3 + i * (w / 3), base + bh, Z, g));
+    parts.forEach((m) => { if (m.geometry.type === 'ExtrudeGeometry') m.rotation.y = Math.PI / 2; });
+    const ch = bh + 2;
+    parts.push(cyl(0.24, ch, mat(0x9aa1ab), X - w / 2 + 0.6, base + ch / 2, Z - F / 2 + 0.5, g, 10));
+    for (let i = 0; i < 3; i++) {
+      const puff = ball(0.28, mat(0xf2f4f7, { transparent: true, opacity: 0.8 }), X - w / 2 + 0.6, base + ch + 0.3, Z - F / 2 + 0.5, g);
+      puff.castShadow = false;
+      animated.push({ type: 'smoke', mesh: puff, base: base + ch + 0.2, phase: i / 3 });
+    }
+    strips(X + 0.2, Z, w, F, base, base + bh);
+    top = base + ch + 0.4;
+  } else {
+    parts.push(box(F, h, F, body, X, base + h / 2, Z, g), box(F + 0.25, 0.22, F + 0.25, mat(0xffffff), X, base + h + 0.11, Z, g));
+    strips(X, Z, F, F, base, base + h);
+    top = base + h + 0.22;
+  }
+  parts.push(box(0.7, 1, 0.08, mat(0xffffff), X, base + 0.5, Z + F / 2 + 0.03, g));
+  return { parts, top };
+}
+
+/* ---------- plaza, park and civic blocks ---------- */
+function buildPlaza(g, seed) {
+  const parts = [box(TILE - 1, 0.3, TILE - 1, mat(0xf3ece0), 0, 0.25, 0, g)];
+  for (let i = -3; i <= 3; i += 1.5) parts.push(box(0.05, 0.02, TILE - 1.2, mat(0xe6dccb), i, 0.41, 0, g), box(TILE - 1.2, 0.02, 0.05, mat(0xe6dccb), 0, 0.41, i, g));
+  parts.push(cyl(1.7, 0.45, mat(0xd8cdb8), 0, 0.6, 0, g, 28), cyl(1.5, 0.05, mat(0x8fd3f0, { roughness: 0.2 }), 0, 0.84, 0, g, 28));
+  parts.push(cyl(0.22, 1.1, mat(0xd8cdb8), 0, 1.3, 0, g, 12), cyl(0.6, 0.15, mat(0xd8cdb8), 0, 1.85, 0, g, 18));
+  const jet = ball(0.22, mat(0xbfe9fb, { transparent: true, opacity: 0.85, roughness: 0.1 }), 0, 2.1, 0, g);
+  jet.castShadow = false;
+  animated.push({ type: 'jet', mesh: jet });
+  [[0, 2.6, 0], [0, -2.6, Math.PI], [2.6, 0, -Math.PI / 2], [-2.6, 0, Math.PI / 2]].forEach(([x, z, r]) => bench(x, z, r, g));
+  [[-3, -3], [3, -3], [-3, 3], [3, 3]].forEach(([x, z], i) => (i % 2 ? lamp(x, z, g) : roundTree(x, z, 0.8, g)));
+  const flowers = [0xe5584f, 0xffc93c, 0xe07ab0, 0xb574d6];
+  const rand = rng(seed);
+  for (let i = 0; i < 10; i++) {
+    const a = rand() * Math.PI * 2, r = 2.05 + rand() * 0.2;
+    parts.push(ball(0.13, mat(flowers[i % 4]), Math.cos(a) * r, 0.5, Math.sin(a) * r, g));
+  }
+  for (let i = 0; i < 2; i++) spots.push({ x: g.position.x + (i ? 1.8 : -1.8), z: g.position.z + 2.0, cx: g.position.x, cz: g.position.z, enter: false });
   return parts;
 }
 
-function buildClockTower(g) {
-  const stone = mat(0xe9d8b4);
-  const parts = [box(2, 0.4, 2, mat(0xd8c49a), 0, 0.2, 0, g), box(1.3, 4.4, 1.3, stone, 0, 2.6, 0, g), box(1.6, 0.25, 1.6, mat(0xd8c49a), 0, 4.9, 0, g)];
-  const cap = place(new THREE.Mesh(new THREE.ConeGeometry(1.15, 1.3, 4), mat(0x55606f)), 0, 5.68, 0, g);
-  cap.rotation.y = Math.PI / 4;
-  parts.push(cap);
-  // Clock faces on the two sides facing the camera, with hands showing the real time.
-  [[0, 0.66, 0], [0.66, 0, Math.PI / 2]].forEach(([x, z, ry]) => {
-    const face = new THREE.Group();
-    face.position.set(x, 4.05, z);
-    face.rotation.y = ry;
-    g.add(face);
-    const disc = place(new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.06, 24), mat(0xffffff)), 0, 0, 0, face);
-    disc.rotation.x = Math.PI / 2;
-    parts.push(disc);
-    const hand = (len, w) => {
-      const pivot = new THREE.Group();
-      pivot.position.z = 0.05;
-      face.add(pivot);
-      place(new THREE.Mesh(new THREE.BoxGeometry(w, len, 0.03), mat(0x1f2733)), 0, len / 2, 0, pivot);
-      return pivot;
-    };
-    animated.push({ type: 'clock', hour: hand(0.26, 0.06), minute: hand(0.4, 0.04) });
-  });
+function buildPark(g, seed) {
+  const parts = [box(TILE - 1, 0.3, TILE - 1, mat(0xa9d99a), 0, 0.25, 0, g)];
+  const pond = cyl(1.4, 0.06, mat(0x8fd3f0, { roughness: 0.2 }), 1.2, 0.42, -1, g, 24);
+  pond.scale.set(1.3, 1, 0.9);
+  parts.push(pond);
+  const path = box(0.9, 0.04, TILE - 1, mat(0xeadfc8), -0.6, 0.42, 0, g);
+  path.rotation.y = 0.5;
+  parts.push(path);
+  const rand = rng(seed);
+  [[-2.8, -2.6], [-2.6, 1.2], [2.8, 2.6], [0.6, 2.9], [-1.0, -3.0], [3.0, 0.9]].forEach(([x, z]) => (rand() < 0.5 ? roundTree : coneTree)(x, z, 0.7 + rand() * 0.35, g));
+  bench(1.1, 1.0, 0, g);
+  spots.push({ x: g.position.x + 1.1, z: g.position.z + 1.5, cx: g.position.x, cz: g.position.z, enter: false });
+  return parts;
+}
+
+function buildCivic(key, g) {
+  const tint = { mail: 0xf8e3e1, calendar: 0xdcefed, report: 0xece6f8, milestone: 0xf3ead6 }[key];
+  const parts = [box(TILE - 1, 0.3, TILE - 1, mat(tint), 0, 0.25, 0, g)];
+  let labelY = 3, door = [0, 1.6];
+  if (key === 'mail') {
+    parts.push(box(3.2, 1.8, 2.4, mat(0xffffff), -0.6, 1.3, -1, g), prism(3.5, 2.8, 0.9, mat(0xe5584f), -0.6, 2.2, -1, g));
+    parts.push(box(2.6, 0.25, 0.06, mat(0xe5584f), -0.6, 1.75, 0.22, g), box(0.7, 1, 0.08, mat(0xb3392f), -0.6, 0.9, 0.23, g));
+    parts.push(box(0.3, 1, 0.3, mat(0x55606f), 1.9, 0.9, 1.4, g), box(1.1, 0.8, 0.8, mat(0xe5584f), 1.9, 1.75, 1.4, g), box(0.8, 0.1, 0.05, mat(0xffffff), 1.9, 1.85, 1.81, g));
+    labelY = 4; door = [-0.6, 0.6];
+    roundTree(-3, 2.6, 0.75, g);
+  } else if (key === 'calendar') {
+    parts.push(box(5, 0.3, 3.6, mat(0xc9e7e4), 0, 0.55, -0.4, g), box(4, 1.6, 2.2, mat(0xffffff), 0, 1.5, -0.8, g), box(4.4, 0.2, 3.2, mat(0xe9eef2), 0, 2.4, -0.4, g));
+    for (const x of [-1.7, -0.6, 0.6, 1.7]) parts.push(cyl(0.14, 1.6, mat(0xf4f6f8), x, 1.5, 0.75, g));
+    parts.push(prism(4.6, 3.4, 1.1, mat(0x3fb6b2), 0, 2.5, -0.4, g), box(0.9, 1.1, 0.08, mat(0x3fb6b2), 0, 1.25, 0.32, g));
+    labelY = 4.6; door = [0, 1.6];
+    lamp(-3, 2.8, g); lamp(3, 2.8, g);
+  } else if (key === 'report') {
+    const purple = mat(0x8e6bd6), win = mat(0xe8defc);
+    let y = 0.4;
+    [[2.4, 1.5], [1.9, 1.4], [1.4, 1.3]].forEach(([s, h]) => {
+      parts.push(box(s, h, s, purple, 0, y + h / 2, -0.6, g), box(s * 0.7, 0.3, 0.06, win, 0, y + h / 2, -0.6 + s / 2 + 0.01, g), box(0.06, 0.3, s * 0.7, win, s / 2 + 0.01, y + h / 2, -0.6, g));
+      y += h;
+    });
+    [[0x5b8def, 0.6], [0xf2a93b, 0.95], [0x4caf7d, 1.35]].forEach(([c, h], i) => {
+      const b = box(0.3, h, 0.3, mat(c), -0.4 + i * 0.4, y + h / 2, -0.6, g);
+      parts.push(b);
+      animated.push({ type: 'grow', mesh: b, base: y, h, phase: i });
+    });
+    parts.push(box(0.7, 1, 0.08, mat(0xffffff), 0, 0.9, 0.63, g));
+    labelY = y + 2; door = [0, 1.2];
+    bench(2.4, 2.2, 0, g); roundTree(-2.8, 2.6, 0.8, g);
+  } else {
+    const stone = mat(0xe9d8b4);
+    parts.push(box(2.2, 0.45, 2.2, mat(0xd8c49a), 0, 0.6, 0, g), box(1.4, 4.8, 1.4, stone, 0, 3.2, 0, g), box(1.7, 0.25, 1.7, mat(0xd8c49a), 0, 5.7, 0, g));
+    const cap = place(new THREE.Mesh(new THREE.ConeGeometry(1.2, 1.4, 4), mat(0x55606f)), 0, 6.5, 0, g);
+    cap.rotation.y = Math.PI / 4;
+    parts.push(cap);
+    [[0, 0.71, 0], [0.71, 0, Math.PI / 2]].forEach(([x, z, ry]) => {
+      const face = new THREE.Group();
+      face.position.set(x, 4.8, z);
+      face.rotation.y = ry;
+      g.add(face);
+      const disc = place(new THREE.Mesh(new THREE.CylinderGeometry(0.52, 0.52, 0.06, 24), mat(0xffffff)), 0, 0, 0, face);
+      disc.rotation.x = Math.PI / 2;
+      parts.push(disc);
+      const hand = (len, w) => {
+        const pivot = new THREE.Group();
+        pivot.position.z = 0.05;
+        face.add(pivot);
+        place(new THREE.Mesh(new THREE.BoxGeometry(w, len, 0.03), mat(0x1f2733)), 0, len / 2, 0, pivot);
+        return pivot;
+      };
+      animated.push({ type: 'clock', hour: hand(0.27, 0.06), minute: hand(0.42, 0.04) });
+    });
+    [[-2.6, 2.6], [2.6, 2.6], [-2.6, -2.6], [2.6, -2.6]].forEach(([x, z]) => parts.push(box(1, 0.35, 1, mat(0x9fd59a), x, 0.55, z, g)));
+    labelY = 7.6; door = null;
+    bench(0, 2.6, 0, g);
+  }
+  if (door) spots.push({ x: g.position.x + door[0], z: g.position.z + door[1], cx: g.position.x, cz: g.position.z, enter: true });
+  else spots.push({ x: g.position.x, z: g.position.z + 2, cx: g.position.x, cz: g.position.z, enter: false });
+  civicLabel[key] = addLabel(el('div', 'label civic', ''), g.position.clone().add(new THREE.Vector3(0, labelY, 0)), key);
   return parts;
 }
 
 function updateCivicLabels() {
   if (!board || !civicLabel.calendar) return;
-  const cal = extra.calendar;
-  const todays = cal?.days?.find((d) => d.date === today());
-  // Short labels: the plaza is narrow on phones. Details live in each panel.
+  // Short labels: blocks are small on phones. Details live in each panel.
+  const todays = extra.calendar?.days?.find((d) => d.date === today());
   civicLabel.calendar.textContent = todays ? `📅 ${todays.events.length} 場` : '📅 會議';
   const next = nextMilestone();
   civicLabel.milestone.textContent = next ? `⏰ ${left(daysLeft(next.date))}` : '⏰ 里程碑';
-  if (extra.mail) {
-    const d = extra.mail.days?.[0];
-    const high = d?.date === today() ? d.items.filter((m) => m.priority === 'high').length : 0;
-    civicLabel.mail.textContent = high ? `✉️ ${high} 重要` : '✉️ 信件';
-  }
+  civicLabel.report.textContent = '📈 週報';
+  const d = extra.mail?.days?.[0];
+  const high = d?.date === today() ? d.items.filter((m) => m.priority === 'high').length : 0;
+  civicLabel.mail.textContent = high ? `✉️ ${high} 重要` : '✉️ 信件';
 }
 const nextMilestone = () => [...board.milestones].filter((m) => daysLeft(m.date) >= 0).sort((a, b) => a.date.localeCompare(b.date))[0];
+
+/* ---------- traffic: cars in both directions on every street ---------- */
+const CAR_COLORS = [0xe5584f, 0x5b8def, 0xf2a93b, 0xf7f8fa, 0x2f3a4d, 0x4caf7d, 0xb574d6, 0x3fb6b2];
+function makeCar(kind, color) {
+  const g = new THREE.Group();
+  const paint = mat(color, { roughness: 0.45 }), glass = mat(0xbcd7ee, { roughness: 0.2 }), tyre = mat(0x2a2f38);
+  const len = kind === 'bus' ? 2.2 : kind === 'van' ? 1.25 : 1.1;
+  const hgt = kind === 'bus' ? 0.75 : kind === 'van' ? 0.55 : 0.32;
+  box(len, hgt, 0.58, paint, 0, 0.2 + hgt / 2, 0, g);
+  if (kind === 'car') {
+    box(0.62, 0.26, 0.52, glass, -0.06, 0.65, 0, g);
+    box(0.64, 0.05, 0.54, paint, -0.06, 0.8, 0, g);
+  } else {
+    box(len * 0.86, 0.2, 0.6, glass, len * 0.03, 0.2 + hgt * 0.7, 0, g);
+    box(0.06, hgt * 0.45, 0.5, glass, len / 2 + 0.01, 0.2 + hgt * 0.68, 0, g);
+  }
+  const wx = len / 2 - 0.28;
+  for (const x of [-wx, wx]) for (const z of [-0.3, 0.3]) {
+    const w = cyl(0.14, 0.1, tyre, x, 0.15, z, g, 12);
+    w.rotation.x = Math.PI / 2;
+  }
+  for (const z of [-0.18, 0.18]) {
+    box(0.04, 0.08, 0.12, mat(0xfff3c4, { emissive: 0xfff0b0, emissiveIntensity: 0.7 }), len / 2 + 0.01, 0.3, z, g);
+    box(0.04, 0.08, 0.12, mat(0xe5584f, { emissive: 0xc02020, emissiveIntensity: 0.4 }), -len / 2 - 0.01, 0.3, z, g);
+  }
+  g.traverse((o) => { o.castShadow = true; });
+  return g;
+}
+function spawnTraffic(xs, zs, cols, rows) {
+  const lines = [...zs.map((z) => ({ axis: 'x', at: z, half: (cols * S) / 2 })), ...xs.map((x) => ({ axis: 'z', at: x, half: (rows * S) / 2 }))];
+  const rand = rng(cols * 13 + rows * 7);
+  const n = Math.min(14, 4 + Math.round(lines.length * 0.9));
+  for (let i = 0; i < n; i++) {
+    const kind = i === 0 ? 'bus' : rand() < 0.25 ? 'van' : 'car';
+    const mesh = makeCar(kind, CAR_COLORS[i % CAR_COLORS.length]);
+    city.add(mesh);
+    const car = { mesh, speed: kind === 'bus' ? 2 : 2.4 + rand() * 1.4 };
+    routeCar(car, lines, rand, rand() * 2 - 1);
+    cars.push(car);
+  }
+}
+function routeCar(car, lines, rand, u) {
+  car.lines = lines;
+  car.rand = rand;
+  car.line = lines[Math.floor(rand() * lines.length)];
+  car.dir = rand() < 0.5 ? 1 : -1;
+  car.u = u ?? -car.dir; // -1..1 along the street
+  const { axis } = car.line;
+  car.mesh.rotation.y = axis === 'x' ? (car.dir > 0 ? 0 : Math.PI) : (car.dir > 0 ? -Math.PI / 2 : Math.PI / 2);
+}
+
+/* ---------- pedestrians walking between buildings ---------- */
+const SHIRTS = [0x5b8def, 0xe5584f, 0xf2a93b, 0x4caf7d, 0xb574d6, 0x3fb6b2, 0xe07ab0, 0x2f3a4d, 0xffffff];
+const SKIN = [0xf1c9a5, 0xe0ac84, 0xc68863, 0x8d5a3b];
+function makeWalker(rand) {
+  const g = new THREE.Group();
+  const legs = mat(0x3a4660);
+  const l1 = box(0.09, 0.3, 0.09, legs, -0.06, 0.15, 0, g), l2 = box(0.09, 0.3, 0.09, legs, 0.06, 0.15, 0, g);
+  cyl(0.14, 0.42, mat(SHIRTS[Math.floor(rand() * SHIRTS.length)]), 0, 0.5, 0, g, 10);
+  ball(0.12, mat(SKIN[Math.floor(rand() * SKIN.length)]), 0, 0.84, 0, g);
+  if (rand() < 0.6) ball(0.125, mat(rand() < 0.5 ? 0x2b2118 : 0x6b4a2e), 0, 0.89, -0.02, g).scale.set(1, 0.6, 1);
+  g.scale.setScalar(1.15);
+  g.userData.legs = [l1, l2];
+  city.add(g);
+  return g;
+}
+// Route along sidewalks: out the front door, along the block's front, down the side, across.
+function walkPath(a, b) {
+  const pts = [[a.x, a.z], [a.x, a.cz + WALK]];
+  if (Math.abs(a.cz - b.cz) > 0.1 || Math.abs(a.cx - b.cx) > 0.1) {
+    const sideX = b.cx >= a.cx ? a.cx + WALK : a.cx - WALK;
+    if (Math.abs(a.cz - b.cz) > 0.1) pts.push([sideX, a.cz + WALK], [sideX, b.cz + WALK]);
+    pts.push([b.x, b.cz + WALK]);
+  }
+  pts.push([b.x, b.z]);
+  return pts;
+}
+function spawnWalkers() {
+  if (spots.length < 2) return;
+  const rand = rng(spots.length * 31);
+  const n = Math.min(26, 6 + board.people.length * 3);
+  for (let i = 0; i < n; i++) {
+    const mesh = makeWalker(rand);
+    const at = Math.floor(rand() * spots.length);
+    const w = { mesh, rand, at, speed: 0.9 + rand() * 0.5, wait: rand() * 6, path: null, k: 0 };
+    mesh.position.set(spots[at].x, 0.4, spots[at].z);
+    mesh.visible = !spots[at].enter;
+    walkers.push(w);
+  }
+}
+function stepWalker(w, dt, t) {
+  if (!w.path) {
+    w.wait -= dt;
+    if (w.wait > 0) return;
+    let to = Math.floor(w.rand() * spots.length);
+    if (to === w.at) to = (to + 1) % spots.length;
+    w.path = walkPath(spots[w.at], spots[to]);
+    w.to = to;
+    w.k = 1;
+    w.mesh.visible = true;
+    w.mesh.position.set(w.path[0][0], 0.4, w.path[0][1]);
+  }
+  const [tx, tz] = w.path[w.k];
+  const p = w.mesh.position, dx = tx - p.x, dz = tz - p.z, dist = Math.hypot(dx, dz);
+  const step = w.speed * dt;
+  if (dist <= step) {
+    p.x = tx; p.z = tz;
+    if (++w.k >= w.path.length) {
+      w.at = w.to;
+      w.path = null;
+      const spot = spots[w.at];
+      w.mesh.visible = !spot.enter; // walked inside
+      w.wait = spot.enter ? 3 + w.rand() * 8 : 2 + w.rand() * 4;
+    }
+  } else {
+    p.x += (dx / dist) * step;
+    p.z += (dz / dist) * step;
+    w.mesh.rotation.y = Math.atan2(dx, dz);
+  }
+  const swing = w.path ? Math.sin(t * 10 + w.speed * 7) * 0.5 : 0;
+  w.mesh.userData.legs[0].rotation.x = swing;
+  w.mesh.userData.legs[1].rotation.x = -swing;
+  p.y = 0.4 + (w.path ? Math.abs(Math.sin(t * 10 + w.speed * 7)) * 0.04 : 0);
+}
 
 /* ---------- camera / controls ---------- */
 const controls = new OrbitControls(camera, canvas);
@@ -419,7 +745,7 @@ controls.screenSpacePanning = true;
 controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
 controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN };
 controls.minZoom = 0.6;
-controls.maxZoom = 4;
+controls.maxZoom = 5;
 
 function fitView() {
   const w = innerWidth, h = innerHeight;
@@ -432,12 +758,13 @@ function fitView() {
   const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
   const up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
   let mr = 0, mu = 0;
-  for (const x of [-dims.W / 2, dims.W / 2]) for (const z of [dims.zMin, dims.zMax]) for (const y of [0, 7]) {
+  // Fit the streets and blocks; the ring of trees outside may be cropped (drag to see it).
+  for (const x of [-dims.coreW / 2, dims.coreW / 2]) for (const z of [-dims.coreD / 2, dims.coreD / 2]) for (const y of [0, 7]) {
     const p = new THREE.Vector3(x, y, z);
     mr = Math.max(mr, Math.abs(p.dot(right)));
     mu = Math.max(mu, Math.abs(p.dot(up)));
   }
-  const half = Math.max(mu * 1.1, (mr * 0.98) / (availW / h));
+  const half = Math.max(mu * 1.08, (mr * (narrow ? 0.9 : 1.02)) / (availW / h));
   // Keep the city clear of the header; on phones, lift it above the open bottom sheet.
   const hudH = $('#hud').offsetHeight || 0;
   const pad = narrow && open ? -half * 0.3 : (hudH / h) * half * (narrow ? 0.7 : 0.9);
@@ -457,28 +784,43 @@ canvas.addEventListener('pointerup', (e) => {
   raycaster.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
   const hit = raycaster.intersectObjects(pickables, false)[0];
   if (!hit) return;
-  const { action, person: id } = hit.object.userData;
-  showView(action ? { type: action } : { type: 'person', id });
+  const { key, cell } = hit.object.userData;
+  if (layoutMode) return layoutPick(key, cell);
+  if (!key || key.startsWith('d:')) return;
+  showView(CIVIC.includes(key) ? { type: key } : { type: 'person', id: key });
 });
 
 const clock = new THREE.Clock();
 const v = new THREE.Vector3();
 (function tick() {
-  const t = clock.getElapsedTime();
+  const dt = Math.min(clock.getDelta(), 0.1), t = clock.elapsedTime;
   const now = new Date(), mins = now.getMinutes() + now.getSeconds() / 60;
   for (const a of animated) {
-    if (a.type === 'bob') a.mesh.position.y = 0.89 + Math.abs(Math.sin(t * 2.2 + a.phase)) * 0.45;
+    if (a.type === 'bob') a.mesh.position.y = 0.79 + Math.abs(Math.sin(t * 2.2 + a.phase)) * 0.45;
     else if (a.type === 'pulse') a.mesh.material.emissiveIntensity = 0.25 + 0.45 * (0.5 + 0.5 * Math.sin(t * 5));
     else if (a.type === 'glow') a.mesh.material.emissiveIntensity = 0.35 + 0.55 * (0.5 + 0.5 * Math.sin(t * 2.5));
     else if (a.type === 'flag') a.mesh.rotation.y = Math.sin(t * 2) * 0.2;
     else if (a.type === 'spin') { a.mesh.rotation.y = t * 2; a.mesh.position.y = 0.68 + Math.sin(t * 3) * 0.06; }
     else if (a.type === 'grow') { const s = 0.75 + 0.25 * Math.sin(t * 1.6 + a.phase); a.mesh.scale.y = s; a.mesh.position.y = a.base + (a.h * s) / 2; }
-    else if (a.type === 'clock') {
+    else if (a.type === 'jet') { const s = 0.8 + 0.35 * Math.abs(Math.sin(t * 3)); a.mesh.scale.set(s, 1 + 0.6 * Math.abs(Math.sin(t * 3)), s); }
+    else if (a.type === 'smoke') {
+      const k = (t * 0.25 + a.phase) % 1;
+      a.mesh.position.y = a.base + k * 2.2;
+      a.mesh.scale.setScalar(0.6 + k * 1.4);
+      a.mesh.material.opacity = 0.8 * (1 - k);
+    } else if (a.type === 'clock') {
       a.minute.rotation.z = -(mins / 60) * Math.PI * 2;
       a.hour.rotation.z = -(((now.getHours() % 12) + mins / 60) / 12) * Math.PI * 2;
     }
   }
-  for (const p of parcels) p.mesh.position.x = -dims.W / 2 + 2 + ((p.t + t * 0.03) % 1) * (dims.W - 4);
+  for (const c of cars) {
+    c.u += (c.dir * c.speed * dt) / c.line.half;
+    if (Math.abs(c.u) > 1.02) routeCar(c, c.lines, c.rand);
+    const along = c.u * c.line.half, lane = 0.42 * c.dir;
+    if (c.line.axis === 'x') c.mesh.position.set(along, 0.06, c.line.at + lane);
+    else c.mesh.position.set(c.line.at - lane, 0.06, along);
+  }
+  for (const w of walkers) stepWalker(w, dt, t);
   controls.update();
   renderer.render(scene, camera);
   for (const l of labels) {
@@ -488,6 +830,92 @@ const v = new THREE.Vector3();
   }
   requestAnimationFrame(tick);
 })();
+
+/* ---------- arranging the city ---------- */
+function enterLayout() {
+  if (!layoutMode) {
+    const pl = placement(0);
+    draft = { layout: Object.fromEntries(pl.pos), decor: board.decor.map((d) => ({ ...d })) };
+    layoutMode = true;
+    picked = null;
+    buildCity();
+    controls.reset();
+    fitView();
+  }
+  showLayoutPanel();
+}
+function exitLayout() {
+  if (!layoutMode) return;
+  layoutMode = false;
+  draft = null;
+  picked = null;
+  buildCity();
+  controls.reset();
+  fitView();
+}
+function layoutPick(key, cell) {
+  if (key) {
+    if (!picked || picked === key) picked = picked === key ? null : key;
+    else {
+      const a = draft.layout[picked], b = draft.layout[key];
+      draft.layout[picked] = b;
+      draft.layout[key] = a;
+      picked = null;
+      buildCity();
+    }
+  } else if (cell && picked) {
+    const pl = placement(1);
+    draft.layout[picked] = [cell[0] - pl.pad + pl.minC, cell[1] - pl.pad + pl.minR];
+    picked = null;
+    buildCity();
+    fitView();
+  }
+  select(picked);
+  showLayoutPanel();
+}
+function addDecor(type) {
+  const id = uid();
+  draft.decor.push({ id, type });
+  draft.layout = Object.fromEntries(placement(0).pos); // give it a free block now
+  picked = 'd:' + id;
+  buildCity();
+  fitView();
+  select(picked);
+  showLayoutPanel();
+}
+function showLayoutPanel() {
+  openPanel('排列城市', { type: 'layout' });
+  select(picked);
+  body.append(el('div', 'hint', '點一個街區選取，再點空地搬過去，或點另一個街區互換位置。可以加廣場和公園。'));
+  body.append(el('div', 'sec', '目前選取'));
+  body.append(el('div', 't picked', picked ? itemName(picked) : '（還沒選）'));
+  if (picked?.startsWith('d:')) {
+    body.append(button('移除這個', 'danger', () => {
+      draft.decor = draft.decor.filter((d) => 'd:' + d.id !== picked);
+      delete draft.layout[picked];
+      picked = null;
+      buildCity();
+      fitView();
+      showLayoutPanel();
+    }));
+  }
+  body.append(el('div', 'sec', '新增'));
+  const row = el('div', 'btn-row');
+  Object.entries(DECOR).forEach(([type, name]) => row.append(button('＋ ' + name, 'ghost', () => addDecor(type))));
+  body.append(row);
+  if (!canEdit()) body.append(editHint());
+  const save = el('div', 'btn-row');
+  save.append(
+    button('儲存排列', '', async () => {
+      const pl = placement(0);
+      const layout = Object.fromEntries(pl.pos), decor = draft.decor;
+      const ok = await mutate((b) => { b.layout = layout; b.decor = decor; return '調整了城市排列'; }, '排列已儲存');
+      if (ok) { closePanel(); }
+    }),
+    button('取消', 'ghost', closePanel),
+  );
+  body.append(el('div', 'sec', ''), save);
+}
 
 /* ---------- HUD: chips and today's three ---------- */
 function focusTasks() {
@@ -536,7 +964,7 @@ function updateHud() {
 
 /* ---------- panels ---------- */
 const panel = $('#panel'), body = $('#panel-body'), title = $('#panel-title');
-const NAV_OF = { dashboard: 'dashboard', team: 'team', mail: 'mail', settings: 'settings' };
+const NAV_OF = { dashboard: 'dashboard', team: 'team', mail: 'mail', settings: 'settings', layout: 'layout' };
 
 function openPanel(name, view) {
   title.textContent = name;
@@ -551,6 +979,7 @@ function openPanel(name, view) {
   select(view.type === 'person' ? view.id : null);
 }
 function closePanel() {
+  exitLayout();
   panel.hidden = true;
   currentView = null;
   document.body.classList.remove('panel-open');
@@ -567,9 +996,11 @@ document.querySelectorAll('#nav button').forEach((b) => (b.onclick = () => showV
 
 const VIEWS = {
   person: showPerson, dashboard: showDashboard, team: showTeam, mail: showMail, settings: showSettings,
-  calendar: showCalendar, report: showReport, milestone: showMilestones, log: showLog,
+  calendar: showCalendar, report: showReport, milestone: showMilestones, log: showLog, layout: enterLayout,
 };
 function showView(view) {
+  // Leaving the arrange mode by opening another panel throws the draft away.
+  if (layoutMode && view.type !== 'layout') exitLayout();
   const same = currentView && currentView.type === view.type && currentView.id === view.id;
   const scroll = same ? body.scrollTop : 0;
   const r = VIEWS[view.type](view);
@@ -748,12 +1179,20 @@ function showPerson({ id }) {
   const pname = field('text', '名字', p.name);
   const role = field('text', '角色（例如：電子工程）', p.role || '');
   const sw = swatches(p.color);
-  body.append(pname, role, sw.node, button('儲存資料', 'ghost', () => {
+  let style = styleOf(p);
+  const styles = el('div', 'seg styles');
+  Object.entries(STYLES).forEach(([k, label]) => {
+    const b = el('button', k === style ? 'on' : '', label);
+    b.type = 'button';
+    b.onclick = () => { style = k; styles.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b)); };
+    styles.append(b);
+  });
+  body.append(pname, role, el('div', 'sub', '建築樣式'), styles, el('div', 'sub', '顏色'), sw.node, button('儲存資料', 'ghost', () => {
     const nm = pname.value.trim();
     if (!nm) return pname.focus();
     mutate((bd) => {
       const x = bd.people.find((y) => y.id === id);
-      if (x) Object.assign(x, { name: nm, role: role.value.trim(), color: sw.value });
+      if (x) Object.assign(x, { name: nm, role: role.value.trim(), color: sw.value, style });
       return `更新 ${nm} 的資料`;
     });
   }));
