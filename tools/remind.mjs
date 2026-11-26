@@ -65,26 +65,51 @@ if (process.argv.includes('--today')) {
   process.exit(0);
 }
 
+const stateFile = join(root, 'private', 'reminders.json');
+const state = existsSync(stateFile) ? JSON.parse(readText(stateFile)) : {};
+const writeState = () => {
+  for (const k of Object.keys(state).filter((k) => /^\d{4}-/.test(k)).sort().slice(0, -8)) delete state[k];
+  writeFileSync(stateFile, JSON.stringify(state, null, 2));
+};
+
+// Calendar sync for the coming Friday (today if it is Friday):
+//   --meeting       -> "MEETING <date> <HH:MM|SKIP> <title>" when the calendar needs updating, else "UNCHANGED ..."
+//   --mark-synced   -> remember that the calendar now matches the board for that Friday
+if (process.argv.includes('--meeting') || process.argv.includes('--mark-synced')) {
+  const fri = new Date(now);
+  fri.setDate(fri.getDate() + ((5 - fri.getDay() + 7) % 7));
+  const date = ymd(fri);
+  const mf = (board.meetings || {})[date] || {};
+  const want = mf.skip ? 'SKIP' : mf.time || weekly.time || '15:00';
+  state.synced = state.synced || {};
+  if (process.argv.includes('--mark-synced')) {
+    state.synced[date] = want;
+    for (const k of Object.keys(state.synced).sort().slice(0, -8)) delete state.synced[k];
+    writeState();
+    console.log(`OK synced ${date} ${want}`);
+  } else if (state.synced[date] === want) {
+    console.log(`UNCHANGED ${date} ${want}`);
+  } else {
+    console.log(`MEETING ${date} ${want} ${weekly.title}`);
+  }
+  process.exit(0);
+}
+
 if (!isFriday) { console.log('SKIP not Friday'); process.exit(0); }
 if (weekly.remind === false) { console.log('SKIP reminders off'); process.exit(0); }
 if (meeting.skip) { console.log('SKIP no meeting this week'); process.exit(0); }
 
-const stateFile = join(root, 'private', 'reminders.json');
-const state = existsSync(stateFile) ? JSON.parse(readText(stateFile)) : {};
 const sent = state[today] || {};
 const save = (key) => {
   state[today] = { ...sent, [key]: new Date().toISOString(), time };
-  for (const k of Object.keys(state).sort().slice(0, -8)) delete state[k];
-  writeFileSync(stateFile, JSON.stringify(state, null, 2));
+  writeState();
 };
 
-// If the meeting was moved after a reminder went out, remind again for the new time.
+// The reminder before the meeting comes from Google Calendar (it reaches the phone even when
+// Claude's notifications are skipped). Here we only nudge about notes after the meeting.
 const sentFor = sent.time === time;
 const diff = meetMin - nowMin;
-if (diff <= 35 && diff >= -30 && !(sent.before && sentFor)) {
-  save('before');
-  console.log(`NOTIFY ${weekly.title} ${time} ${diff > 0 ? `開始，還有 ${diff} 分鐘` : '已經開始了'}`);
-} else if (diff <= -60 && diff >= -300 && !meeting.submittedAt && !(sent.notes && sentFor)) {
+if (diff <= -60 && diff >= -300 && !meeting.submittedAt && !(sent.notes && sentFor)) {
   save('notes');
   console.log(`NOTIFY 開完${weekly.title}了嗎？到看板會議廳寫筆記，按「交給 Claude 彙整」，週報會整理成大項`);
 } else {

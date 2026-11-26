@@ -28,6 +28,9 @@
 - 每週週報：`weekly-report`，每週五 18:00（只提交 `data/reports.enc.json`）。
   會讀取 `board.meetings[本週五]` 裡使用者按「交給 Claude 彙整」的週會筆記，整理成 `meeting.highlights`（大項）、`decisions`、`actions`。
   使用者在 app 裡說「彙整週會」時，照 `weekly-report` 排程的步驟做一次即可。
-- 週會提醒：`meeting-reminder`，週五 08:00–19:30 每 30 分鐘執行 `tools/remind.mjs`。
-  時間與「這週不開」都由使用者在網頁會議廳設定（`board.weekly`、`board.meetings[週五].time/skip`），不用改排程。
-  已提醒狀態記在 `private/reminders.json`。
+- 週會提醒：Google 日曆有每週五重複的「週會」活動（說明欄含 `[團隊看板週會]`），會前 30 分鐘提醒由日曆負責。
+  `daily-mail-digest` 每天、`meeting-reminder` 週五每 30 分鐘，照 `tools/CALENDAR_SYNC.md` 把看板設定的時間／「這週不開」同步到當週那一次活動。
+  `meeting-reminder` 另外在會後一小時提醒交筆記。時間都由使用者在網頁會議廳設定（`board.weekly`、`board.meetings[週五].time/skip`），不用改排程。
+  狀態記在 `private/reminders.json`。
+- 排程的 git 一律用 `node tools/git-sync.mjs pull` 和 `node tools/git-sync.mjs push "<訊息>" <檔案...>`，不要自己下 git 指令。
+- 模型：`meeting-reminder` 用 Haiku，`daily-mail-digest` 和 `weekly-report` 用 Sonnet（寫在各自 SKILL.md 的 `model:`）。

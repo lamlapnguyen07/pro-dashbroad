@@ -1752,7 +1752,7 @@ function meetingSection() {
   week.append(el('b', '', skip ? `本週 ${md(fri)}：這週不開` : `本週 ${md(fri)} 週五 ${time}`), el('span', 'muted', skip ? '' : `（${left(daysLeft(fri))}）`));
   if (m.time && !skip) week.append(el('span', 'tag doing', '這週改時間'));
   box.append(week);
-  if (wk.remind !== false && !skip) box.append(el('div', 'muted small', `⏰ 會前 30 分鐘提醒你；開完一小時後提醒你交筆記。`));
+  if (!skip) box.append(el('div', 'muted small', `⏰ Google 日曆會在會前 30 分鐘提醒你${wk.remind !== false ? '；開完一小時後提醒你交筆記' : ''}。改時間或這週不開，日曆會自動跟著改（每天早上同步，週五每半小時）。`));
   if (canEdit()) {
     // This week only: move the meeting or skip it.
     const ctl = el('div', 'meet-ctl');
@@ -1840,13 +1840,13 @@ function meetingSection() {
   const cb = el('input');
   cb.type = 'checkbox';
   cb.checked = wk.remind !== false;
-  rem.append(cb, el('span', '', '開會前 30 分鐘提醒我、會後提醒交筆記'));
+  rem.append(cb, el('span', '', '開完會一小時後提醒我交筆記'));
   more.append(el('div', 'sub', '名稱'), t, el('div', 'sub', '每週五預設時間'), tm, rem, button('儲存設定', 'ghost', () => {
     const title = t.value.trim() || '週會';
     const time = tm.value || '15:00';
     mutate((b) => { b.weekly = { ...b.weekly, title, time, remind: cb.checked }; return `週會設定：每週五 ${title} ${time}${cb.checked ? '' : '（不提醒）'}`; });
   }));
-  more.append(el('div', 'muted small', '提醒支援 08:30–19:30 之間的時間。'));
+  more.append(el('div', 'muted small', 'Google 日曆裡每週五的「週會」會自動跟著這裡的時間調整，包含預設時間、單週改時間和「這週不開」。'));
   box.append(more);
   return box;
 }
